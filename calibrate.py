@@ -1,0 +1,67 @@
+# calibrate.py
+# Step 2: measure your camera's lens so pixels can be turned into real distances.
+#
+# What you need: a printed checkerboard (search "OpenCV checkerboard 9x6 pdf"),
+# taped flat on a book or cardboard.
+#
+# How to run:  python calibrate.py
+# Keys:  c = capture this view (do ~15 from different angles/distances)
+#        q = finish and calculate
+
+import cv2
+import numpy as np
+
+BOARD = (8, 5)        # INNER corners of the checkerboard (columns, rows)
+SQUARE_M = 0.025      # size of one square in metres (measure your printout!)
+
+# The real-world 3D positions of the corners (flat board, so z = 0)
+board_points = np.zeros((BOARD[0] * BOARD[1], 3), np.float32)
+board_points[:, :2] = np.mgrid[0:BOARD[0], 0:BOARD[1]].T.reshape(-1, 2) * SQUARE_M
+
+all_board_points = []   # 3D points, one set per captured photo
+all_image_points = []   # where those corners appeared in each photo (pixels)
+
+cap = cv2.VideoCapture(0)
+image_size = None
+
+while True:
+    ok, frame = cap.read()
+    if not ok:
+        break
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    image_size = gray.shape[::-1]   # (width, height)
+
+    # Try to find the checkerboard corners in this frame
+    found, corners = cv2.findChessboardCornersSB(gray, BOARD)
+    if found:
+        cv2.drawChessboardCorners(frame, BOARD, corners, found)
+
+    cv2.putText(frame, f"captured: {len(all_image_points)}  (c=capture, q=done)",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    cv2.imshow("calibrate", frame)
+
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord("c") and found:
+        # Refine corner positions to sub-pixel accuracy, then store them
+        corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1),
+                                   (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
+        all_board_points.append(board_points)
+        all_image_points.append(corners)
+        print(f"Captured view {len(all_image_points)}")
+    elif key == ord("q"):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+
+if len(all_image_points) < 8:
+    print("Need at least 8 good views. Run again.")
+else:
+    # The actual calibration: finds the camera matrix K and lens distortion
+    error, K, dist, _, _ = cv2.calibrateCamera(all_board_points, all_image_points,
+                                               image_size, None, None)
+    print("Average error (pixels, smaller is better, aim < 1):", round(error, 3))
+    print("Camera matrix K:\n", K)
+    print("Distortion:", dist.ravel())
+    np.savez("calib.npz", K=K, dist=dist)
+    print("Saved to calib.npz")
