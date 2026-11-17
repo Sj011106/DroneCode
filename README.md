@@ -35,27 +35,35 @@ Whoever holds the steadiest position at the highest altitude wins.
 3. **Clean up what the camera gets wrong.** The drone tilts to fly, which slides the picture without any
    real movement. The cheap camera also scans the image row by row ("rolling shutter"), which warps
    it when the drone shakes. The drone's motion sensors (IMU) tell us exactly how it tilted and
-   shook, so we subtract those effects.
+   shook, so we subtract those effects. High up, the view gets flat and hazy, so we **boost local contrast** first.
 4. **Turn pixels into metres** using the height from the barometer or rangefinder.
-5. **Grade every measurement** (quality 1–100, or "don't trust") and send it to the autopilot.
-   The autopilot's EKF3 filter blends it with its own sensors and steers back to home.
-6. **If vision fails** (blackout, dust, blur), tell the autopilot to ignore us, search for home
+5. **Climbing changes the picture size.** When the ground has shrunk or grown by about 15%, we take a
+   **new reference photo** on the spot and keep counting from the original home, so the hold never breaks.
+6. **Grade every measurement** (quality 1–100, or "don't trust") and send it to the autopilot with an error
+   estimate that **grows with height** (one pixel covers more ground up high). The autopilot's EKF3 filter
+   blends it with its own sensors and steers back to home.
+7. **If vision fails** (blackout, dust, blur), tell the autopilot to ignore us, search for home
    again, and if it doesn't come back within 3 s, **land safely**.
+8. **Record every practice flight** and replay it on the ground with features switched on or off, to tune
+   settings and to make the "with vs without" plots, without flying again.
 
 ---
 
 ## 2. Architecture
 
+### 2.1 The whole system
+
 ```mermaid
 flowchart LR
-    subgraph SENSORS["Sensors"]
-        CAM["Justice D camera<br/>(nadir, rolling shutter)"]
+    subgraph SENSORS["Sensors (provided by the organisers)"]
+        CAM["Justice D camera<br/>nadir, rolling shutter"]
         IMU["Autopilot IMU<br/>roll / pitch / yaw, 50 Hz"]
         ALT["Barometer /<br/>rangefinder"]
     end
 
-    subgraph APB["APB onboard computer (our code, vision_hold.py)"]
+    subgraph APB["APB onboard computer: our code (vision_hold.py)"]
         direction TB
+        ENH["vision/enhance.py<br/>contrast boost (CLAHE)"]
         TRK["vision/tracker.py<br/>Harris + LK + RANSAC<br/>(Saumya)"]
         RS["vision/rolling_shutter.py<br/>per-row IMU correction"]
         HLT["health/health.py<br/>OK / DEGRADED / LOST<br/>(Saumya)"]
@@ -64,23 +72,29 @@ flowchart LR
         TILT["fusion/tilt.py<br/>remove tilt shift"]
         HGT["fusion/height.py<br/>filtered height"]
         MET["pixels to metres<br/>(to_north_east)"]
+        RH["vision/rehome.py<br/>new reference while climbing<br/>+ offset to original home"]
+        LINK["link/drone_link.py<br/>ODOMETRY + noise that<br/>grows with height"]
         FS["recovery/failsafe.py<br/>LAND after 3 s lost"]
         PROF["compute/profiler.py<br/>ms per stage"]
+        RECD["tools/replay.py<br/>--record"]
     end
 
     subgraph AP["ArduPilot (flight controller)"]
         EKF["EKF3<br/>fuses our position + IMU + baro"]
-        CTRL["Position controller"]
+        CTRL["LOITER position controller"]
     end
 
-    CAM --> TRK
+    CAM --> ENH --> TRK
+    CAM --> RECD
     IMU --> RS --> TRK
-    TRK --> HLT --> IMUC --> TILT --> MET
+    TRK --> HLT --> IMUC --> TILT --> MET --> RH --> LINK
     HLT -- "LOST" --> REC -- "relock" --> TRK
+    RH -- "new reference" --> TRK
     IMU --> IMUC
     IMU --> TILT
     ALT --> HGT --> MET
-    MET -- "MAVLink ODOMETRY<br/>+ quality" --> EKF --> CTRL
+    HGT --> LINK
+    LINK -- "MAVLink ODOMETRY<br/>position + quality + noise" --> EKF --> CTRL
     HLT --> FS -- "set mode LAND" --> CTRL
 ```
 
@@ -92,27 +106,89 @@ flowchart LR
 | **Our vision pipeline** | APB (Python + OpenCV) | turns pictures into a trusted "metres from home" |
 | **Final fusion and control** | ArduPilot EKF3 on the flight controller | blends our position with its own IMU, flies the drone |
 
-The autopilot link is MAVLink (`link/drone_link.py`). We send `ODOMETRY` messages with a quality
-score, and we switch the EKF between GPS (source set 1) and our vision (source set 2).
+The autopilot link is MAVLink (`link/drone_link.py`). We send `ODOMETRY` messages with a position, a quality
+score and an error estimate, and we switch the EKF between GPS (source set 1) and our vision (source set 2).
+
+### 2.2 Trust: how vision is judged, lost, recovered
+
+```mermaid
+stateDiagram-v2
+    [*] --> WAITING: program starts
+    WAITING --> LOST: pilot flips channel 7 (home photo saved)
+    LOST --> OK: 5 good frames in a row (EKF switched to vision)
+    OK --> DEGRADED: 1 bad frame (blur, few points, IMU disagrees)
+    DEGRADED --> OK: next frame good
+    DEGRADED --> LOST: 3 bad frames in a row
+    OK --> OK: climbed ~15% re-home (new reference, same position)
+    LOST --> LOST: ORB searches for home every 3rd frame
+    LOST --> FAILSAFE: still LOST after 3 s
+    FAILSAFE --> [*]: LAND
+```
+
+While **OK**, our position is used. In **DEGRADED** and **LOST** we send quality −1, so ArduPilot ignores us and
+coasts on its IMU and barometer.
+
+### 2.3 Climbing: why re-homing is needed
+
+The health check rejects a picture when the ground looks more than ~33% bigger or smaller than at home.
+Climbing from 10 m to 40 m makes the ground look 4× smaller, so without re-homing vision is lost at ~13 m.
+
+```mermaid
+sequenceDiagram
+    participant D as Drone (climbing)
+    participant T as Tracker
+    participant R as rehome.py
+    participant A as ArduPilot
+    D->>T: 10 m: home photo saved
+    T->>A: position (0.0, 0.0)
+    D->>T: 11.5 m: ground looks 13% smaller
+    T->>R: scale 0.87 is outside 0.85..1.18? not yet
+    D->>T: 11.8 m: ground looks 15% smaller
+    R->>T: take a NEW reference photo here
+    R->>R: remember offset = current position (e.g. N +0.03, E -0.02)
+    T->>A: position = offset + 0 (no jump, no reset)
+    Note over D,A: repeats every ~15% of height (10 → 40 m = 8 re-homes in the test)
+```
+
+### 2.4 Practice and tuning loop (no extra flights needed)
+
+```mermaid
+flowchart LR
+    FLY["Practice flight<br/>vision_hold.py --record DIR<br/>GPS on as referee"] --> REC[("recording:<br/>video + times +<br/>IMU + height")]
+    FLY --> BIN[("ArduPilot<br/>.bin log")]
+    REC --> RP["Replay on a laptop<br/>--replay DIR --set USE_TILT=0"]
+    RP --> AL["tools/analyze_log.py<br/>position / health / compute plots"]
+    BIN --> TD["tools/truth_drift.py<br/>REAL drift vs GPS<br/>per altitude band"]
+    AL --> TUNE["Tune config.py and<br/>vision_hold.param"]
+    TD --> TUNE
+    TUNE --> FLY
+    AL --> SLIDES["Slides:<br/>with vs without"]
+```
 
 ---
 
 ## 3. What happens every frame
 
-At 30 fps, each frame has a **33 ms budget**. Measured on a laptop: about **10 ms** in total.
+At 30 fps, each frame has a **33 ms budget**. Measured on a laptop: about **7–11 ms** in total (the APB will be slower:
+measure it with `compute.benchmark`). Steps in the order `vision_hold.py` runs them:
 
 | # | Step | File | Plain words |
 |---|---|---|---|
 | 1 | Grab | `vision_hold.py`, `compute/budget.py` | Read the newest picture and timestamp it; throw away stale ones |
-| 2 | Track | `vision/tracker.py` + `vision/rolling_shutter.py` | Find home's corners again, undo the rolling-shutter warp, measure slide + turn |
-| 3 | Health | `health/health.py` | Too dark? Blurry? Frozen? Enough agreeing points? → quality score |
-| 4 | IMU check | `fusion/imu_check.py` | Does the camera's "we turned X°" match the compass? If not, don't trust it |
-| 5 | Recovery | `recovery/recovery.py` | Only if LOST: search the whole picture for home and re-lock |
-| 6 | Tilt | `fusion/tilt.py` | Subtract the fake slide caused by roll and pitch |
-| 7 | Metres | `vision/tracker.py: to_north_east()` + `fusion/height.py` | pixels × height ÷ focal length → metres North/East |
-| 8 | Send | `link/drone_link.py` | ODOMETRY message to ArduPilot (quality −1 = "ignore me") |
-| 9 | Source / failsafe | `vision_hold.py`, `recovery/failsafe.py` | Switch the EKF to vision when trusted; LAND if lost too long |
-| 10 | Log | `logs/flight_*.csv` | One row per frame, including ms per stage |
+| 2 | Contrast boost | `vision/enhance.py` | Bring out detail in flat, hazy views (leaves very dark/bright frames alone, so the alarms still work) |
+| 3 | Record | `tools/replay.py` | Only with `--record`: save the frame, its time, the IMU and the height for replay |
+| 4 | Home trigger | `vision_hold.py` | Pilot flipped channel 7? Save the home photo (rolling-shutter corrected) |
+| 5 | Track | `vision/tracker.py` + `vision/rolling_shutter.py` | Find home's corners again, undo the rolling-shutter warp, measure slide + turn + scale |
+| 6 | Health | `health/health.py` | Too dark? Blurry? Frozen? Enough agreeing points? → quality score, OK / DEGRADED / LOST |
+| 7 | Height | `fusion/height.py` | Smooth the barometer/rangefinder height, ignore spikes |
+| 8 | IMU check | `fusion/imu_check.py` | Does the camera's "we turned X°" match the compass? If not, don't trust this frame |
+| 9 | Recovery | `recovery/recovery.py` | Only if LOST: search the whole picture for home and re-lock the tracker |
+| 10 | Tilt | `fusion/tilt.py` | Subtract the fake slide caused by roll and pitch |
+| 11 | Metres | `vision/tracker.py: to_north_east()` | pixels × height ÷ focal length → metres North/East, plus the re-home offset |
+| 12 | Re-home | `vision/rehome.py` | Ground ~15% bigger/smaller (climb/descent)? New reference here, same position |
+| 13 | Send | `link/drone_link.py` | ODOMETRY to ArduPilot: position, quality (−1 = "ignore me"), error that grows with height |
+| 14 | Source / failsafe | `vision_hold.py`, `recovery/failsafe.py` | Switch the EKF to vision when trusted; LAND if lost for 3 s |
+| 15 | Log | `logs/flight_*.csv` | One row per frame: position, status, corrections, re-homes, ms per stage |
 
 ---
 
@@ -129,6 +205,8 @@ DroneCode/
 ├── vision/                   ── BRIEF 1: seeing the ground ──
 │   ├── tracker.py            Saumya: Harris corners, Lucas-Kanade, forward-backward check, RANSAC
 │   ├── rolling_shutter.py    RollingShutterTracker = Saumya's tracker + per-row IMU correction
+│   ├── rehome.py             new reference picture while climbing (keeps holding as height changes)
+│   ├── enhance.py            local contrast boost (CLAHE) for high / hazy / flat-light views
 │   ├── timing.py             when each image row was captured (readout time, delay)
 │   └── feature_filter.py     Saumya (to write): drop bad corners (legs in view, glare, moving things)
 │
@@ -164,7 +242,10 @@ DroneCode/
 │
 ├── tools/
 │   ├── analyze_log.py        flight log → position / health / compute plots + summary
-│   ├── degrade_video.py      camera SIMULATOR (used by tests) + add wobble/blur/blackouts to real video
+│   ├── degrade_video.py      camera SIMULATOR (used by tests, incl. realistic terrain) + wobble/blur/blackouts
+│   ├── replay.py             record a flight (--record) and replay it through the same code (--replay)
+│   ├── truth_drift.py        ArduPilot .bin log → REAL drift vs GPS truth per altitude band
+│   ├── discover_hardware.py  run on the APB: finds CPU/OS/Python, cameras, flight-controller port
 │   ├── read_drone.py         Saumya: simplest MAVLink connection test
 │   ├── fake_vision.py        Saumya: fake vision from the simulator's true position (Windows only)
 │   └── ground_lock.py        Saumya: first ORB version, kept for reference
@@ -176,13 +257,19 @@ DroneCode/
 │   ├── test_health.py        IMU cross-check + height filter
 │   ├── test_recovery.py      2 s and 10 s blackouts
 │   ├── test_failsafe.py      failsafe timing
-│   └── test_params.py        param file says what the code needs + loader works
+│   ├── test_params.py        param file says what the code needs + loader works
+│   ├── test_rehome.py        climb 10 m → 40 m while holding
+│   ├── test_replay.py        record once, replay with settings toggled
+│   ├── test_truth_drift.py   real-drift calculator on a flight with known answers
+│   └── test_altitude.py      5–80 m sweep, normal and flat light, contrast boost on/off
 │
 ├── deploy/
 │   ├── install.sh            one-shot setup on the APB (venv, self-test, boot service)
 │   └── vision_hold.service   systemd: start at boot, restart on crash
 │
 ├── docs/
+│   ├── WORKLIST.md           TEAM TO-DO: every task with why / steps / done-when, phase by phase
+│   ├── hardware.md           what hardware we have (facts vs guesses), day-1 checklist, organiser questions
 │   └── presentation_notes.md slide → code → proof
 └── logs/                     flight CSVs and benchmark reports (git-ignored)
 ```
@@ -196,12 +283,15 @@ DroneCode/
 
 | Brief asks | Our answer | Code | Proof |
 |---|---|---|---|
-| **Sensor fusion pipeline** | Camera tracking + IMU-based tilt and rolling-shutter correction + IMU yaw cross-check + filtered height, then EKF3 fuses it with its IMU using our quality score | `vision/`, `fusion/`, `ardupilot/` | `test_tilt`: 94 cm → 9.8 cm fake drift at 10° tilt |
+| **Sensor fusion pipeline** | Camera tracking + IMU-based tilt and rolling-shutter correction + IMU yaw cross-check + filtered height, then EKF3 fuses it with its IMU using our quality score and a height-scaled error | `vision/`, `fusion/`, `ardupilot/` | `test_tilt`: 94 cm → 9.8 cm fake drift at 10° tilt; `test_replay`: tilt off on the same recording 3.9 → 57.6 cm |
 | **Rolling shutter** | Measure readout time + delay from video and IMU, then move every tracked point to the frame's mid-row time | `vision/rolling_shutter.py`, `vision/timing.py`, `calibration/calibrate_timing.py` | `test_rolling_shutter`: 30 ms readout measured as 29 ms; 92% of rolling-shutter error removed |
-| **Onboard compute** | Everything on the APB; every stage timed every frame; no stale frames | `compute/` | `compute.benchmark`: 6.4 ms/frame on a laptop (budget 33 ms). APB run to do |
+| **Altitude (the trial)** | Re-home while climbing, contrast boost for flat/hazy views, EKF trusts us less as we climb | `vision/rehome.py`, `vision/enhance.py`, `link/drone_link.py` | `test_rehome`: 10 → 40 m climb, lost at 13.4 m without, 100% trusted with; `test_altitude`: flat light 40–80 m 0% → 91% trusted |
+| **Onboard compute** | Everything on the APB; every stage timed every frame; no stale frames | `compute/` | `compute.benchmark`: 6.9 ms/frame on a laptop incl. contrast boost (budget 33 ms). APB run to do |
 | **Detect and recover** | Health + IMU check detect; quality −1 lets the EKF coast; ORB re-finds home; LAND after 3 s | `health/`, `fusion/imu_check.py`, `recovery/` | `test_recovery`: trusted again 0.2 s after 2 s and 10 s blackouts (never without it) |
 
 Slide-by-slide notes: [`docs/presentation_notes.md`](docs/presentation_notes.md).
+
+> **New to the team? Start here:** [`docs/WORKLIST.md`](docs/WORKLIST.md) (what to do next, with context) and [`docs/hardware.md`](docs/hardware.md) (what hardware we have).
 
 ---
 
@@ -274,12 +364,29 @@ Useful `vision_hold.py` options:
 | `--fixed-height 0.5` | bench test: webcam 0.5 m above a table |
 | `--show` | preview window with status |
 | `--no-gps-fallback` | never switch back to GPS |
+| `--record DIR` | also save raw video + times + attitude + height for replay |
+| `--replay DIR` | run on a recording instead of camera + drone (as fast as possible) |
+| `--set NAME=VALUE` | override a `config.py` setting, e.g. `--set USE_TILT=False` |
+| `--log PATH` | name of the flight log |
 
 ### After a flight
 
 ```bash
 python -m tools.analyze_log                        # newest log → docs/plots/*.png + summary
+python -m tools.truth_drift 00000042.BIN            # ArduPilot log: REAL drift vs GPS per altitude band
 ```
+
+**Fly with `--record`** in practice, then make the "with vs without" comparisons on the ground from that one flight:
+
+```bash
+python vision_hold.py --replay logs/rec_1 --log logs/all_on.csv
+python vision_hold.py --replay logs/rec_1 --log logs/no_tilt.csv --set USE_TILT=False
+python vision_hold.py --replay logs/rec_1 --log logs/no_rs.csv   --set USE_ROLLING_SHUTTER=False
+python -m tools.analyze_log logs/no_tilt.csv
+```
+
+**Practice flights:** keep the GPS receiver ON as a referee (the EKF flies on source set 2 = vision, GPS is only
+logged), then `tools.truth_drift` gives the real drift the judges would measure.
 
 ### Simulator (no drone)
 
@@ -437,6 +544,10 @@ python -m tests.test_health             # IMU cross-check + height filter
 python -m tests.test_recovery           # blackouts (~45 s)
 python -m tests.test_failsafe           # failsafe timing
 python -m tests.test_params             # ArduPilot param file + loader
+python -m tests.test_rehome             # climb 10 → 40 m (~1 min)
+python -m tests.test_replay             # record + replay + toggles (~1 min)
+python -m tests.test_truth_drift        # real-drift calculator
+python -m tests.test_altitude           # 5–80 m sweep (~1 min)
 ```
 
 The tests use a **camera simulator** (`tools/degrade_video.py: render()`) that draws what the
@@ -451,6 +562,10 @@ downward camera sees for any position, tilt and rolling-shutter timing, so every
 | Recovery | 2 s and 10 s blackouts with 1–2 m drift: trusted again in 0.2 s (without recovery: never) |
 | Failsafe | fires once, 3.0 s after loss, re-arms after recovery |
 | Params | 32 settings match what the code needs; loader verifies, writes, flags unknown names; noise sent grows with height above ~40 m |
+| Re-home (climb 10 → 40 m) | without: trust lost at 13.4 m; with: 100% trusted above 15 m, 8 re-homes, error mean 7–8 cm, max 15 cm |
+| Replay | identical results on repeat; live run reproduced 90/90 frames; tilt fix off → error 3.9 → 57.6 cm; RS fix off → trusted frames 114 → 56 |
+| Truth drift | known drift / vision error / EKF error recovered per altitude band to < 1 cm |
+| Altitude sweep | error ~0.6 px at every height = 0.7 cm at 5 m → 12 cm at 80 m; flat light at 40–80 m: 0% trusted without contrast boost, 91% with it |
 
 ---
 
@@ -465,9 +580,12 @@ New settings live in **`config.py`**. Saumya's settings stay at the top of her f
 | `USE_IMU_CHECK` | vision vs IMU yaw cross-check |
 | `USE_HEIGHT_FILTER` | height smoothing |
 | `USE_RECOVERY` | ORB re-find home |
+| `USE_REHOME` | new reference picture while climbing/descending (`REHOME_SCALE_MIN/MAX`) |
+| `USE_CLAHE` | local contrast boost before tracking + health (`CLAHE_CLIP`, `CLAHE_TILES`) |
 | `FAILSAFE_ACTION` | `"LAND"` (default), `"ALT_HOLD"` or `"NONE"` |
 
-Switching one off and flying or replaying the same video gives the "with vs without" plot for the slides.
+Switching one off and flying or replaying the same recording (`--replay DIR --set NAME=False`) gives the
+"with vs without" plot for the slides.
 
 ---
 
@@ -497,6 +615,10 @@ Switching one off and flying or replaying the same video gives the "with vs with
 | Recovery + failsafe | ✅ |
 | Profiler, budget, benchmark | ✅; **run the benchmark on the APB** |
 | Log analysis plots | ✅ |
+| Re-home while climbing | ✅ simulated; **test in flight: climb in steps, watch `Re-homed` messages** |
+| Record + replay | ✅; **fly every practice flight with `--record`** |
+| Real drift vs GPS (`truth_drift`) | ✅ logic tested on synthetic data; **first real .bin log still to check (field names)** |
+| Altitude sweep + contrast boost | ✅ simulated; **check sharpness / trust on real footage at height** |
 | `vision/feature_filter.py` | ⬜ Saumya |
 | Real flight logs and plots | ⬜ SITL, then the drone |
 | `docs/architecture.png` for slides | ⬜ (the diagram in section 2 can be exported) |
@@ -507,7 +629,11 @@ Switching one off and flying or replaying the same video gives the "with vs with
 
 **Known limits:** the tilt fix only corrects the main effect of tilting, leaving about 2 px of error
 at 5° and 9 px at 10° (see `fusion/tilt.py`). Rolling-shutter correction covers rotation only;
-movement during the 25 ms scan is tiny at altitude.
+movement during the 25 ms scan is tiny at altitude. Each re-home freezes in the error of that moment, so error
+can grow a little per re-home (climb test: 1.5 cm → 7–8 cm over 8 re-homes). Simulated terrain is a model:
+real ground texture at height must be checked on footage. Recommendation for Saumya: `health.BLUR_BAD` is an
+absolute threshold; making it relative to the home frame's sharpness would remove the flat-light false alarm
+at its root (the contrast boost works around it).
 
 ---
 

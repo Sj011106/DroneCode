@@ -36,6 +36,7 @@
 # -------------------------------------------------------------------------------------
 
 import argparse
+import ast
 import csv
 import os
 import time
@@ -57,6 +58,9 @@ from fusion.imu_check import ImuCheck
 from fusion.tilt import cancel_tilt
 from recovery.failsafe import Failsafe
 from recovery.recovery import Recovery
+from tools.replay import Recorder, Replay
+from vision.enhance import enhance
+from vision.rehome import Rehome
 from vision.rolling_shutter import RollingShutterTracker
 from vision.timing import load_timing
 
@@ -109,7 +113,7 @@ class HomeTrigger:
 
 
 # ---------------- Main loop ----------------
-def main():
+def main(argv=None):                                             # NEW: argv for tests
     ap = argparse.ArgumentParser(description="Automatic vision position hold")
     ap.add_argument("--connect", default=CONNECTION)
     ap.add_argument("--camera", default="0", help="camera number or video file")
@@ -119,19 +123,35 @@ def main():
     ap.add_argument("--no-gps-fallback", action="store_true")
     ap.add_argument("--show", action="store_true", help="show a preview window")
     ap.add_argument("--max-seconds", type=float, default=MAX_SECONDS)
-    args = ap.parse_args()
+    # NEW: record a flight, replay it through this same code, toggle settings for replays
+    ap.add_argument("--record", metavar="DIR", help="save video + times + attitude + height here")
+    ap.add_argument("--replay", metavar="DIR", help="run on a recording instead of camera + drone")
+    ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                    help="override a config.py setting, e.g. --set USE_TILT=False")
+    ap.add_argument("--log", metavar="PATH", help="flight log file name (default logs/flight_<time>.csv)")
+    args = ap.parse_args(argv)
+    for item in args.set:                                        # NEW
+        name, value = item.split("=", 1)
+        if not hasattr(config, name):
+            raise SystemExit(f"--set: config.py has no setting {name}")
+        setattr(config, name, ast.literal_eval(value))
+        print(f"config.{name} = {getattr(config, name)!r}")
+    replay = Replay(args.replay) if args.replay else None        # NEW
+    clock = replay.clock if replay else time.time                # NEW: recorded time during replay
 
-    link = DroneLink(args.connect)
+    link = replay.link if replay else DroneLink(args.connect)    # NEW: replay link
     link.start()
     link.check_params()
 
-    is_camera = args.camera.isdigit()
-    cap = cv2.VideoCapture(int(args.camera) if is_camera else args.camera)
+    is_camera = args.camera.isdigit() and not replay              # NEW: not replay
+    cap = replay.cap if replay else cv2.VideoCapture(int(args.camera) if is_camera else args.camera)
     if not cap.isOpened():
         print(f"Could not open camera/video '{args.camera}'. Check the number or file name.")
         link.running = False
         return
     frame_gap = 0.0 if is_camera else 1.0 / (cap.get(cv2.CAP_PROP_FPS) or 30)  # play videos in real time
+    if replay:
+        frame_gap = 0.0                                          # NEW: replay as fast as possible
     if is_camera:                                                # NEW: no stale frames in the queue
         print(f"Camera 1-frame queue: {'yes' if make_low_latency(cap) else 'not supported by this backend'}")
 
@@ -139,24 +159,27 @@ def main():
     # NEW: Saumya's GroundTracker + rolling-shutter correction (identical if switched off)
     timing = load_timing()
     print(f"Rolling shutter: {'ON' if config.USE_ROLLING_SHUTTER else 'OFF'}, {timing}")
-    tracker = RollingShutterTracker(K, dist, attitude_history=link.attitudes, timing=timing)
+    tracker = RollingShutterTracker(K, dist, attitude_history=link.attitudes, timing=timing,
+                                    enabled=config.USE_ROLLING_SHUTTER)   # NEW: explicit, so --set works
     health = HealthChecker()
     imu_check, height_filter = ImuCheck(), HeightFilter()        # NEW
     recovery, failsafe = Recovery(tracker), Failsafe()           # NEW
+    rehome = Rehome()                                            # NEW: new reference while climbing
     prof, budget = Profiler(budget_ms=1000 / config.TARGET_FPS), FrameBudget()   # NEW
     home_att = None                                              # NEW: attitude when HOME was saved
-    trigger = HomeTrigger(args.trigger)
+    trigger = replay.trigger if replay else HomeTrigger(args.trigger)   # NEW: recorded trigger in replay
+    recorder = Recorder(args.record) if args.record else None    # NEW
     fallback = FALLBACK_TO_GPS and not args.no_gps_fallback
 
     os.makedirs("logs", exist_ok=True)
-    log_path = time.strftime("logs/flight_%Y%m%d_%H%M%S.csv")
+    log_path = args.log or time.strftime("logs/flight_%Y%m%d_%H%M%S.csv")   # NEW: --log
     log_file = open(log_path, "w", newline="")
     log = csv.writer(log_file)
     log.writerow(["t_capture", "status", "quality", "north_m", "east_m", "height_m", "shift_x_px",
                   "shift_y_px", "rotation_deg", "inliers", "source", "reasons",
                   # NEW columns (tools/analyze_log.py plots these)
                   "corr_x_px", "corr_y_px", "imu_err_deg", "relocks",
-                  "ms_grab", "ms_track", "ms_health", "ms_fusion", "ms_send", "ms_total"])
+                  "ms_grab", "ms_track", "ms_health", "ms_fusion", "ms_send", "ms_total", "rehomes"])
 
     home_saved, home_pending, reset_counter, last_texture_warn = False, False, 0, 0.0
     want_source, last_source_try = None, 0.0
@@ -167,7 +190,7 @@ def main():
 
     try:
         while args.max_seconds is None or time.time() - started < args.max_seconds:
-            now = time.time()
+            now = clock()                                        # NEW: was time.time()
             if now - last_heartbeat > 1.0:                       # "I'm alive" once a second
                 link.send_heartbeat()
                 last_heartbeat = now
@@ -181,7 +204,7 @@ def main():
                 next_frame += frame_gap
             prof.start_frame()                                   # NEW: after the video pacing wait
             ok, frame = cap.read()
-            t_capture = time.time()
+            t_capture = clock()                                  # NEW: was time.time()
             if not ok:
                 if not is_camera:
                     print("Video finished.")
@@ -195,12 +218,15 @@ def main():
                 time.sleep(0.05)
                 continue
             last_frame_ok = t_capture
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = enhance(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))   # NEW: enhance() = contrast boost
             t_frame = timing.mid_time(t_capture)                 # NEW: real capture time (= t_capture until calibrated)
             prof.lap("grab")                                     # NEW
 
             # ---------- 2. Home trigger (replaces 'r') ----------
-            if trigger.fired(link):
+            fired = trigger.fired(link)                          # NEW: kept for the recorder
+            if recorder:                                         # NEW: record raw inputs
+                recorder.add(frame, t_capture, fired, link.height(t_capture), link.attitudes)
+            if fired:
                 home_pending = True                              # try on this frame and the next ones
             if home_pending:
                 n = tracker.set_reference(gray, t_capture)       # NEW: t_capture -> rolling-shutter fix on home too
@@ -209,6 +235,7 @@ def main():
                     home_att = link.attitude_at(t_frame)         # NEW: for tilt + IMU check
                     imu_check.set_home(home_att[2] if home_att else None)
                     recovery.set_home(gray)                      # NEW: fingerprints for re-finding home
+                    rehome.reset()                               # NEW: positions count from THIS home
                     home_saved, home_pending = True, False
                     reset_counter = (reset_counter + 1) % 256    # tells the EKF "position jumped to 0"
                     prev_ne, vel_ned = None, np.zeros(3)
@@ -254,11 +281,20 @@ def main():
             north = east = float("nan")
             if quality > 0:
                 north, east = to_north_east(shift, height, tracker.focal_px, att[2])   # NEW: shift (was res.shift_px)
+                north, east = rehome.total(north, east)          # NEW: + offset of the current reference
                 if prev_ne is not None and t_capture > prev_ne[2]:   # smooth velocity estimate
                     dt = t_capture - prev_ne[2]
                     v = np.array([(north - prev_ne[0]) / dt, (east - prev_ne[1]) / dt, 0.0])
                     vel_ned = 0.7 * vel_ned + 0.3 * v
                 prev_ne = (north, east, t_capture)
+
+            # NEW: climbed/descended ~15% -> new reference picture here, position stays continuous
+            if config.USE_REHOME and quality > 0 and rehome.due(rep.status, res):
+                if rehome.rehome(tracker, health, gray, t_capture, north, east, MIN_HOME_CORNERS):
+                    home_att = att_real or home_att
+                    imu_check.set_home(att_real[2] if att_real else None)   # rotation restarts at 0 here
+                    recovery.set_home(gray)
+                    print(f"Re-homed at {height:.1f} m (#{rehome.count}), offset N={north:+.2f} E={east:+.2f}")
 
             # ---------- 4. Send to the autopilot ----------
             down = link.local_z[1] if link.local_z else 0.0      # ignored: height source is Baro
@@ -293,7 +329,8 @@ def main():
                           # NEW columns
                           f"{shift[0]:.2f}" if res.ok else "", f"{shift[1]:.2f}" if res.ok else "",
                           f"{imu_err:.2f}", recovery.relocks,
-                          *(f"{ms.get(s, 0.0):.2f}" for s in ("grab", "track", "health", "fusion", "send", "total"))])
+                          *(f"{ms.get(s, 0.0):.2f}" for s in ("grab", "track", "health", "fusion", "send", "total")),
+                          rehome.count])
             if is_camera:                                        # NEW: fell behind -> drop stale frames
                 for _ in range(budget.frames_to_drop(loop_ms / 1000)):
                     cap.grab()
@@ -321,6 +358,9 @@ def main():
         link.running = False
         cap.release()
         log_file.close()
+        if recorder:                                             # NEW
+            recorder.close()
+            print(f"Recording saved in {args.record} ({recorder.n} frames)")
         cv2.destroyAllWindows()
         if prof.frames:                                          # NEW: compute summary for the slide
             print(f"\n{prof.table()}\nRe-locks: {recovery.relocks}, stale frames dropped: {budget.dropped}")

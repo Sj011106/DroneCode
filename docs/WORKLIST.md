@@ -57,7 +57,8 @@ ArduPilot version, and the exact drift thresholds.
 ## Phase 1: Now, no hardware needed
 
 ### 1.1 Finish gaps 1–4 (re-homing, record/replay, ground truth, altitude sweep)
-- [ ] **Owner:** Claude (background agent) → reviewed by: ______
+- [x] **Owner:** Claude → **DONE.** New: `vision/rehome.py`, `vision/enhance.py`, `tools/replay.py`
+  (`vision_hold.py --record DIR`, `--replay DIR --set USE_TILT=0`), `tools/truth_drift.py`; 4 new tests.
 - **Why:** (1) The health check (`health.py`) rejects the picture if the ground looks more than ~33% bigger
   or smaller than at home, so **climbing after saving home makes vision LOST**. That blocks the altitude
   trial. Re-homing saves a new reference picture while climbing without losing position.

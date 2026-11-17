@@ -38,6 +38,7 @@ from fusion.tilt import cancel_tilt
 from health.health import HealthChecker
 from recovery.recovery import Recovery
 from tools.degrade_video import make_ground, render
+from vision.enhance import enhance
 from vision.rolling_shutter import RollingShutterTracker
 from vision.tracker import load_calibration
 
@@ -83,12 +84,12 @@ def main():
     imu.set_home(0.0)
     prof = Profiler(budget_ms=1000 / 30)
 
-    first = cv2.cvtColor(frames[0][1], cv2.COLOR_BGR2GRAY)
+    first = enhance(cv2.cvtColor(frames[0][1], cv2.COLOR_BGR2GRAY))
     tracker.set_reference(first, frames[0][0])
     for t, frame in frames[1:]:
         prof.start_frame()
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        prof.lap("grab")
+        gray = enhance(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        prof.lap("grab")                   # includes the contrast boost (CLAHE)
         res = tracker.track(gray, t)
         prof.lap("track")
         health.check(gray, res)
@@ -103,7 +104,7 @@ def main():
     rec.set_home(first)
     t0 = time.perf_counter()
     for _, frame in frames[1:11]:
-        rec.find_home(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        rec.find_home(enhance(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
     orb_ms = (time.perf_counter() - t0) * 100            # mean of 10, in ms
 
     h, w = first.shape

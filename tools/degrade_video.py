@@ -18,6 +18,12 @@
 #   (t_mid + (v/H - 0.5) * readout), intersected with the plane z = 0, and the ground
 #   texture is sampled there (cv2.remap). readout = 0 gives a global-shutter image.
 #   Row timing matches vision/timing.py, pose convention matches fusion/tilt.py.
+#   make_terrain(): ground with fine "gravel" (a few cm) on top of large structures with
+#   a 1/f spectrum (natural scenes are roughly 1/f). Seen from high up, the gravel
+#   averages out inside one pixel (contrast falls ~ gravel size / pixel size), which is
+#   the "features shrink with altitude" effect from the brief.
+#   render_mip(): render() from a texture pyramid, blending the two levels that match
+#   the current pixel footprint (trilinear mip-mapping), so high views don't alias.
 #
 # HOW TO RUN (from the repo root)
 #   python -m tools.degrade_video in.mp4 out.mp4 --wobble 6 12   # 6 px jello at 12 Hz
@@ -31,6 +37,9 @@
 #   - Meingast, Geyer, Sastry, "Geometric Models of Rolling-Shutter Cameras", OMNIVIS
 #     2005 (row-time camera model used here).
 #   - OpenCV cv2.remap: https://docs.opencv.org/4.x/da/d54/group__imgproc__transform.html
+#   - Field, "Relations between the statistics of natural images and the response
+#     properties of cortical cells", JOSA A 1987 (natural images: amplitude ~ 1/f).
+#   - Williams, "Pyramidal Parametrics", SIGGRAPH 1983 (mip-mapping).
 # =====================================================================================
 
 import argparse
@@ -81,6 +90,52 @@ def render(ground, K, size, pose_fn, t_mid, readout_s=0.0, noise=0.0, rng=None,
         rng = rng or np.random.default_rng()
         img = np.clip(img + rng.normal(0, noise, img.shape), 0, 255).astype(np.uint8)
     return img
+
+
+def make_terrain(size=2048, m_per_texel=0.02, gravel_m=0.03, gravel_std=45.0, large_std=20.0,
+                 contrast=1.0, seed=0):
+    """Ground texture (uint8) with one texel = m_per_texel metres:
+    gravel of ~gravel_m (averaged down if a texel is bigger) + 1/f large-scale structure.
+    contrast < 1 = flat light / haze (deviations from mid-grey shrink)."""
+    rng = np.random.default_rng(seed)
+    # Large structures: 1/f amplitude spectrum from 50 m down to 2 texels
+    fx = np.fft.fftfreq(size)[None, :]
+    fy = np.fft.fftfreq(size)[:, None]
+    f = np.hypot(fx, fy) / m_per_texel                       # cycles per metre
+    amp = np.where((f > 1 / 50.0), 1.0 / np.maximum(f, 1e-9), 0.0)
+    spec = amp * np.exp(2j * np.pi * rng.random((size, size)))
+    large = np.real(np.fft.ifft2(spec))
+    large *= large_std / (large.std() + 1e-9)
+    # Gravel: blobs of gravel_m; averaging (texel/gravel)^2 blobs per texel cuts the std
+    sigma = max(gravel_m / m_per_texel / 2, 0.5)
+    gravel = cv2.GaussianBlur(rng.normal(0, 1, (size, size)).astype(np.float32), (0, 0), sigma)
+    gravel *= gravel_std * min(1.0, gravel_m / m_per_texel) / (gravel.std() + 1e-9)
+    img = 128 + contrast * (large + gravel)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def make_pyramid(ground, levels=6):
+    pyr = [ground]
+    for _ in range(levels - 1):
+        pyr.append(cv2.pyrDown(pyr[-1]))
+    return pyr
+
+
+def render_mip(pyr, K, size, pose_fn, t_mid, m_per_texel, readout_s=0.0, noise=0.0, rng=None):
+    """render() from a pyramid: picks/blends the levels whose texel matches the pixel footprint."""
+    f = (K[0, 0] + K[1, 1]) / 2
+    lvl = float(np.clip(math.log2(max(pose_fn(t_mid)[2] / f / m_per_texel, 1.0)), 0, len(pyr) - 1))
+    lo = int(lvl)
+    hi = min(lo + 1, len(pyr) - 1)
+    w = lvl - lo
+    img = render(pyr[lo], K, size, pose_fn, t_mid, readout_s, m_per_texel=m_per_texel * 2 ** lo).astype(np.float32)
+    if w > 0.01 and hi != lo:
+        img2 = render(pyr[hi], K, size, pose_fn, t_mid, readout_s, m_per_texel=m_per_texel * 2 ** hi)
+        img = (1 - w) * img + w * img2
+    if noise:
+        rng = rng or np.random.default_rng()
+        img = img + rng.normal(0, noise, img.shape)
+    return np.clip(img, 0, 255).astype(np.uint8)
 
 
 # ---------------- Effects for real video ----------------

@@ -128,6 +128,8 @@ def main():
         print(f"Untrusted periods: {len(lost_spans)}, longest {longest:.2f} s")
     if "relocks" in cols:
         print(f"Re-locks (recovery): {int(num(cols['relocks'][-1]))}")
+    if "rehomes" in cols:
+        print(f"Re-homes (climb/descent): {int(num(cols['rehomes'][-1]))}")
     if "ms_total" in cols:
         tot = np.array([num(x) for x in cols["ms_total"]])
         print(f"Per frame: mean {np.nanmean(tot):.1f} ms, 95% {np.nanpercentile(tot, 95):.1f} ms")

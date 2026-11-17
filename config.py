@@ -18,6 +18,17 @@ USE_TILT = True              # fusion/tilt.py: remove fake motion caused by roll
 USE_IMU_CHECK = True         # fusion/imu_check.py: reject frames where vision and IMU disagree
 USE_HEIGHT_FILTER = True     # fusion/height.py: smooth height, ignore spikes
 USE_RECOVERY = True          # recovery/recovery.py: re-find home after LOST
+USE_REHOME = True            # vision/rehome.py: new reference picture while climbing/descending
+USE_CLAHE = True             # vision/enhance.py: local contrast boost (high / hazy / flat light)
+
+# ---------------- Contrast boost (CLAHE) ----------------
+CLAHE_CLIP = 2.0             # higher = stronger boost (and more noise)
+CLAHE_TILES = 8              # picture split into 8 x 8 tiles
+
+# ---------------- Re-home during climbs ----------------
+REHOME_SCALE_MIN = 0.85      # ground looks 15% smaller than in the reference -> new reference
+REHOME_SCALE_MAX = 1.18      # ground looks 18% bigger (descending) -> new reference
+                             # (health.py rejects outside 0.75..1.33, so switch well before)
 
 # ---------------- Rolling shutter timing ----------------
 # Used ONLY if timing.npz is missing. calibration/calibrate_timing.py measures the real ones.
