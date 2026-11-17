@@ -61,4 +61,35 @@ rows = apply(fake, wanted)
 status = {r[0]: r[4] for r in rows}
 print(f"  write    : {status}")
 assert status["VISO_TYPE"] == "CHANGED" and fake.store["VISO_TYPE"] == 1.0
+
+# ---- 3. The confidence we send to ArduPilot scales with height ----
+print("\nTest 3: position noise sent in ODOMETRY vs height (quality 50, focal 416 px)")
+import math
+from link.drone_link import DroneLink
+
+
+class Capture:
+    def odometry_send(self, *args):
+        self.cov = args[13]                     # pose_covariance (after 3 angular rates)
+
+
+link = object.__new__(DroneLink)            # no real connection needed
+link.send_lock, link.conn = threading.Lock(), type("C", (), {"mav": Capture()})()
+
+
+def sent_noise(height):
+    link.send_odometry(0.0, 0, 0, 0, (0, 0, 0), (0, 0, 0), 50, 0,
+                       metres_per_px=None if height is None else height / 416)
+    c = link.conn.mav.cov
+    return math.sqrt(c[0] + c[6] + c[11])       # what ArduPilot computes from it
+
+
+old = sent_noise(None)
+n2, n40, n60, n100 = sent_noise(2), sent_noise(40), sent_noise(60), sent_noise(100)
+print(f"  without height (Saumya's formula): {old:.2f} m")
+print(f"  2 m: {n2:.2f} m   40 m: {n40:.2f} m   60 m: {n60:.2f} m   100 m: {n100:.2f} m")
+print("  (Saumya's formula stays the minimum; above ~40 m the pixel-based noise takes over)")
+assert abs(n2 - old) < 1e-9 and abs(n40 - old) < 1e-9, "low down, Saumya's formula must still apply"
+assert old < n60 < n100, "noise must grow with height up high"
+assert n100 > 2 * old
 print("\nALL PARAM TESTS PASSED")

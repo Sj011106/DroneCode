@@ -264,7 +264,8 @@ def main():
             down = link.local_z[1] if link.local_z else 0.0      # ignored: height source is Baro
             send_n, send_e = (north, east) if quality > 0 else (0.0, 0.0)
             link.send_odometry(t_capture, send_n, send_e, down, att,
-                               ned_to_body(vel_ned, *att), quality, reset_counter)
+                               ned_to_body(vel_ned, *att), quality, reset_counter,
+                               metres_per_px=height / tracker.focal_px if quality > 0 else None)   # NEW
             prof.lap("send")                                     # NEW
 
             # ---------- 5. Source switching (replaces 'v' and 'g') ----------

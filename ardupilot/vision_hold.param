@@ -54,10 +54,14 @@ VISO_POS_Z,0             #   ... metres below
 VISO_DELAY_MS,50         # how old our position is when it arrives: camera delay + processing.
                          # Tune: -offset from timing.npz (calibrate_timing) + mean ms_total from
                          # the flight log + ~5 ms link. Too low or too high = oscillation in LOITER.
-VISO_POS_M_NSE,0.1       # position noise (m) the EKF assumes for us: lower = trusts us more
-VISO_VEL_M_NSE,0.1       # velocity noise (m/s); only used if EK3_SRC2_VELXY = 6
-VISO_YAW_M_NSE,0.2       # yaw noise (rad); unused: yaw comes from the compass (EK3_SRC2_YAW)
-VISO_QUAL_MIN,30         # ignore our messages with quality below 30 (health.py score, -1 = bad)
+VISO_POS_M_NSE,0.1       # MINIMUM position noise (m), allowed range 0.1..10, default 0.2.
+                         # ArduPilot uses sqrt(var_x+var_y+var_z) from OUR ODOMETRY covariance
+                         # and only falls back to this if ours is lower. 0.1 = let our
+                         # covariance decide; it grows with height (config.ODOM_PX_NOISE_*)
+VISO_VEL_M_NSE,0.1       # minimum velocity noise (m/s); only used if EK3_SRC2_VELXY = 6
+VISO_YAW_M_NSE,0.2       # minimum yaw noise (rad); yaw comes from the compass anyway
+VISO_QUAL_MIN,30         # pass/fail gate: messages with quality < 30 never reach the EKF
+                         # (quality does NOT change the noise; our covariance does that)
 
 # ---------------- 3. Source set 1 = GPS (normal flying, take-off area) ----------------
 EK3_SRC1_POSXY,3         # horizontal position: GPS

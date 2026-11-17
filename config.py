@@ -43,5 +43,14 @@ FAILSAFE_AFTER_S = 3.0       # vision LOST this long (while flying on vision) ->
 FAILSAFE_ACTION = "LAND"     # "LAND", "ALT_HOLD" or "NONE". LAND matches ArduPilot's own
                              # EKF failsafe default (FS_EKF_ACTION = 1).
 
+# ---------------- Confidence we send to ArduPilot ----------------
+# Position error in PIXELS at the best / worst quality. link/drone_link.py multiplies it by
+# metres-per-pixel (height / focal), so ArduPilot trusts us less the higher we fly.
+# Saumya's quality-only formula stays the MINIMUM (0.17 m per axis at quality 50), so this
+# only takes over higher up. Example at quality 50: up to ~40 m -> 0.17 m (hers),
+# 60 m -> 0.25 m, 100 m -> 0.42 m. Tune from the tracker's real jitter in flight logs.
+ODOM_PX_NOISE_BEST = 0.5     # quality 100
+ODOM_PX_NOISE_WORST = 3.0    # quality 1
+
 # ---------------- Compute budget ----------------
 TARGET_FPS = 30              # camera frame rate; the time budget per frame is 1 / TARGET_FPS

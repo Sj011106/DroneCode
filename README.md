@@ -17,11 +17,13 @@ Whoever holds the steadiest position at the highest altitude wins.
 5. [How the code answers the brief](#5-how-the-code-answers-the-brief)
 6. [Setup](#6-setup)
 7. [How to use it](#7-how-to-use-it)
-8. [Tests and results](#8-tests-and-results)
-9. [Settings and on/off switches](#9-settings-and-onoff-switches)
-10. [Team rules and conventions](#10-team-rules-and-conventions)
-11. [Status and to-do](#11-status-and-to-do)
-12. [Glossary](#12-glossary)
+8. [Flight control and tuning](#8-flight-control-and-tuning)
+9. [Simulator testing step by step](#9-simulator-testing-step-by-step)
+10. [Tests and results](#10-tests-and-results)
+11. [Settings and on/off switches](#11-settings-and-onoff-switches)
+12. [Team rules and conventions](#12-team-rules-and-conventions)
+13. [Status and to-do](#13-status-and-to-do)
+14. [Glossary](#14-glossary)
 
 ---
 
@@ -281,11 +283,151 @@ python -m tools.analyze_log                        # newest log → docs/plots/*
 
 ### Simulator (no drone)
 
-Start Mission Planner's SITL, then `python vision_hold.py --show` (connects to `tcp:127.0.0.1:5762`).
+See [section 9](#9-simulator-testing-step-by-step).
 
 ---
 
-## 8. Tests and results
+## 8. Flight control and tuning
+
+### Who flies the drone
+
+**We don't write a position controller. ArduPilot flies.** Our job is to give it a trustworthy position;
+its job is to fly to that position. This is the standard design for companion-computer navigation, and the
+presentation story: *"we built a trustworthy position sensor from a cheap camera, and a proven controller flies on it."*
+
+```
+ APB (our Python, ~30 Hz)               Flight controller (ArduPilot, ~400 Hz)
+┌──────────────────────────┐            ┌─────────────────────────────────────────────┐
+│ camera → tracker → health│  ODOMETRY  │  EKF3: blends our position + IMU + baro     │
+│ → RS/tilt fix → metres   │──────────► │        → best estimate of position/velocity │
+│ "0.3 m N of home,        │  MAVLink   │                    │                        │
+│  quality 85, ±0.17 m"    │            │  LOITER position controller (cascade):      │
+└──────────────────────────┘            │   position error → target velocity          │
+                                        │   velocity error → target acceleration      │
+                                        │   acceleration   → lean angle (roll/pitch)  │
+                                        │   angle error    → rotation rate            │
+                                        │   rate error     → motor outputs            │
+                                        └─────────────────────────────────────────────┘
+```
+
+**One correction, step by step:** wind pushes the drone 0.3 m north → the camera sees the ground slide → we send
+"N = +0.30 m" → EKF3 blends it with the accelerometers (the IMU fills the gaps between our 30 Hz frames, and
+`VISO_DELAY_MS` lines our late measurement up with the right moment) → the position loop asks for ~0.3 m/s south →
+the velocity loop asks for an acceleration → the drone leans a few degrees south → error shrinks.
+That lean is exactly the fake motion `fusion/tilt.py` removes. Without the fix, every correction would look like new drift.
+
+### How much ArduPilot trusts us
+
+Checked in ArduPilot's source (`AP_VisualOdom_MAV.cpp`):
+
+- **Noise:** EKF3 uses `sqrt(var_x + var_y + var_z)` from the covariance in our ODOMETRY message, but never less
+  than `VISO_POS_M_NSE`. We set that floor to its minimum (0.1 m) so our numbers decide.
+- **Our numbers grow with height** (`link/drone_link.py: odometry_sigma_px`, `config.ODOM_PX_NOISE_*`): one pixel
+  covers more ground higher up, so the same tracking error means more metres. Saumya's quality-based formula stays
+  the minimum; above ~40 m the height-based value takes over (quality 50: 0.17 m → 0.42 m per axis at 100 m).
+- **Quality** is only a gate: below `VISO_QUAL_MIN` (30) the message is dropped. It doesn't change the noise.
+
+### When vision degrades
+
+| Our status | What we send | What ArduPilot does |
+|---|---|---|
+| OK | position + quality + noise | holds position |
+| DEGRADED (1–2 bad frames) | quality −1 | coasts on IMU + barometer for a few hundred ms, which is fine |
+| LOST | quality −1 every frame | dead-reckons; its uncertainty grows while `recovery.py` searches for home |
+| LOST > 3 s | our failsafe switches to LAND | lands in place |
+| EKF estimate bad | (backup) | `FS_EKF_ACTION 1` → lands |
+
+### What we tune (in this order)
+
+| # | Knob | Where | How |
+|---|---|---|---|
+| 1 | Airframe gains (`ATC_*`) | ArduPilot | Once, on GPS, before any vision work (AutoTune). Never touch them for vision |
+| 2 | `VISO_DELAY_MS` | `ardupilot/vision_hold.param` | Start at −offset from `timing.npz` + mean `ms_total` from a flight log + ~5 ms. Then step ±10–20 ms |
+| 3 | `ODOM_PX_NOISE_BEST/WORST` | `config.py` | Twitchy hold → raise. Slow, lazy corrections → lower |
+| 4 | `PSC_POSXY_P` | ArduPilot | Overshoots home → lower. Drifts far before correcting → raise. Default 1.0 |
+| 5 | `LOIT_ACC_MAX`, `ANGLE_MAX` | `ardupilot/vision_hold.param` | Already reduced. Lower = smaller tilts = clearer images |
+
+**Reading the symptoms:**
+
+| What the drone does | Likely cause | Fix |
+|---|---|---|
+| Slow swaying back and forth (1–3 s period) | `VISO_DELAY_MS` wrong | step it ±20 ms, keep the better one |
+| Fast jitter or twitching | EKF trusts noisy vision too much | raise `ODOM_PX_NOISE_*` |
+| Circles around home ("toilet-bowling") | heading wrong (compass) | compass calibration; `imu_check` will log disagreements |
+| Steady drift in one direction | sign or axis wrong, or wrong camera orientation | bench test with `--fixed-height`, check `tracker.py` sign convention |
+| Holds low, gets worse higher up | normal: features shrink, pixel noise grows | more texture, better focus, higher `ODOM_PX_NOISE_*`, slower `LOIT_*` |
+
+### Why not write our own controller?
+
+We could (GUIDED mode, sending velocity commands), but it puts a 30 Hz Python loop in charge of flying, skips
+ArduPilot's tested safety logic, and adds a second controller that can fight the first. The judges score the
+fusion pipeline, onboard compute and recovery, not a hand-written PID.
+
+---
+
+## 9. Simulator testing step by step
+
+The simulator (SITL) runs real ArduPilot on a PC with a virtual drone. Use it to practise the procedure and tune
+before risking hardware.
+
+### Step 1: start the simulator
+
+**Windows (Mission Planner):** Simulation tab → choose **Multirotor** → it downloads and starts ArduCopter SITL
+and connects. Our tools connect to the second port, `tcp:127.0.0.1:5762` (the default in all our tools).
+
+**Linux:** `sim_vehicle.py -v ArduCopter --console --map --out=udp:127.0.0.1:14551`, then use
+`--connect udp:127.0.0.1:14551` with our tools. (`tools/fake_vision.py` is Windows-only and fixed to 5762.)
+
+### Step 2: load our ArduPilot settings
+
+```bash
+python -m ardupilot.load_params --connect tcp:127.0.0.1:5762
+```
+
+Restart the simulator (some settings need a reboot), then check:
+
+```bash
+python -m link.check_link --connect tcp:127.0.0.1:5762      # should say PASS
+```
+
+The hardware section of the param file stays commented out in the simulator. GPS stays on so the drone can take off normally.
+
+### Step 3: tune the autopilot side with perfect fake vision
+
+This tests ArduPilot's behaviour alone, with a clean position and no camera.
+
+1. Mission Planner → Actions: **Arm**, mode **GUIDED**, right-click the map → **Takeoff** to 10 m, then mode **LOITER**.
+2. Run `py -m tools.fake_vision`. It sends the simulator's true position plus 2 cm of noise. Press **v**: the EKF switches to source set 2 (vision).
+3. Turn GPS off in the simulator: Full Parameter List → search `SIM_GPS` → disable it (`SIM_GPS_DISABLE = 1`; the
+   name differs between firmware versions). The drone must keep holding.
+4. Add wind (`SIM_WIND_SPD 5`, `SIM_WIND_DIR 90`) and watch how far it drifts.
+5. Experiments (edit locally, **don't commit**): raise `NOISE_M` in `tools/fake_vision.py` to 0.1–0.3 m and watch when
+   the hold turns twitchy; step `VISO_DELAY_MS` from 0 to 150 and watch when it starts swaying. Fake vision has
+   almost no delay, so this shows how *sensitive* the hold is. The real value comes from the drone.
+
+### Step 4: test our real pipeline's plumbing
+
+```bash
+python -m tools.degrade_video flight.mp4 test.mp4 --blackout 10 6       # 6 s blackout at 10 s
+python vision_hold.py --camera test.mp4 --trigger mode --no-gps-fallback --show
+```
+
+Switch the simulator to LOITER: home is saved, vision becomes OK, source set 2 is selected, and the blackout leads
+to LOST and then FAILSAFE → LAND after 3 s. The video doesn't match the simulated motion, so this checks the
+**sequence** (home, switching, quality, failsafe), not hold accuracy.
+
+### Step 5: read the results
+
+```bash
+python -m tools.analyze_log            # our side: position, health timeline, ms per stage
+```
+
+On the ArduPilot side, open the flight log in Mission Planner (Ctrl+F → Review a Log) and compare our vision
+positions with the EKF position (`XKF1` PN/PE). Large gaps or slow swings mean `VISO_DELAY_MS` or the noise needs tuning.
+
+---
+
+## 10. Tests and results
 
 ```bash
 python -m tests.test_tracker            # Saumya: tracker < 1 px error, signs, health checks
@@ -308,11 +450,11 @@ downward camera sees for any position, tilt and rolling-shutter timing, so every
 | IMU check | 20° disagreement rejected, agreement within 0.01° |
 | Recovery | 2 s and 10 s blackouts with 1–2 m drift: trusted again in 0.2 s (without recovery: never) |
 | Failsafe | fires once, 3.0 s after loss, re-arms after recovery |
-| Params | 32 settings match what the code needs; loader verifies, writes, flags unknown names |
+| Params | 32 settings match what the code needs; loader verifies, writes, flags unknown names; noise sent grows with height above ~40 m |
 
 ---
 
-## 9. Settings and on/off switches
+## 11. Settings and on/off switches
 
 New settings live in **`config.py`**. Saumya's settings stay at the top of her files.
 
@@ -329,7 +471,7 @@ Switching one off and flying or replaying the same video gives the "with vs with
 
 ---
 
-## 10. Team rules and conventions
+## 12. Team rules and conventions
 
 - **Don't rewrite Saumya's logic** (`tracker.py`, `health.py`, `drone_link.py`, calibration). Improve
   *around* it: subclass it (`RollingShutterTracker`), wrap it, or add a step in `vision_hold.py`.
@@ -345,7 +487,7 @@ Switching one off and flying or replaying the same video gives the "with vs with
 
 ---
 
-## 11. Status and to-do
+## 13. Status and to-do
 
 | Item | Status |
 |---|---|
@@ -359,6 +501,8 @@ Switching one off and flying or replaying the same video gives the "with vs with
 | Real flight logs and plots | ⬜ SITL, then the drone |
 | `docs/architecture.png` for slides | ⬜ (the diagram in section 2 can be exported) |
 | ArduPilot param file + loader | ✅; **tune `VISO_DELAY_MS` after calibrate_timing** |
+| Trust that scales with height (ODOMETRY noise) | ✅; **tune `ODOM_PX_NOISE_*` from flight logs** |
+| SITL procedure | ✅ documented (section 9); **run it** |
 | Values from the technical spec | ⬜ `config.py`, hardware section of `ardupilot/vision_hold.param`, `deploy/` |
 
 **Known limits:** the tilt fix only corrects the main effect of tilting, leaving about 2 px of error
@@ -367,7 +511,7 @@ movement during the 25 ms scan is tiny at altitude.
 
 ---
 
-## 12. Glossary
+## 14. Glossary
 
 | Term | Meaning |
 |---|---|

@@ -43,6 +43,16 @@ def euler_to_quaternion(roll, pitch, yaw):
             cr * sp * cy + sr * cp * sy, cr * cp * sy - sr * sp * cy]
 
 
+def odometry_sigma_px(quality):
+    """NEW: expected position error IN PIXELS for a quality score (1..100).
+    Multiplied by metres-per-pixel (height / focal length) this becomes metres, so the
+    confidence we send shrinks automatically as we climb. ArduPilot's EKF uses
+    sqrt(var_x + var_y + var_z) from our covariance as its noise, never lower than
+    VISO_POS_M_NSE (AP_VisualOdom_MAV.cpp: constrain_float(posErr, pos_noise, 100))."""
+    import config
+    return config.ODOM_PX_NOISE_BEST + (config.ODOM_PX_NOISE_WORST - config.ODOM_PX_NOISE_BEST) * (1 - quality / 100)
+
+
 # ---------------- Talking to the autopilot ----------------
 class DroneLink:
     """Keeps the newest autopilot data up to date in the background, and sends our messages."""
@@ -121,10 +131,13 @@ class DroneLink:
         self.command(mavutil.mavlink.MAV_CMD_SET_EKF_SOURCE_SET, n)
         print(f">>> asked autopilot to use {'VISION' if n == SRC_VISION else 'GPS'} (source set {n})")
 
-    def send_odometry(self, t_capture, north, east, down, att, vel_body, quality, reset_counter):
+    def send_odometry(self, t_capture, north, east, down, att, vel_body, quality, reset_counter,
+                      metres_per_px=None):
         roll, pitch, yaw = att
         if quality > 0:
             sigma = 0.02 + 0.3 * (1 - quality / 100)        # metres: better quality = smaller
+            if metres_per_px:   # NEW: higher up, one pixel = more metres -> same pixel error = more metres
+                sigma = max(sigma, odometry_sigma_px(quality) * metres_per_px)
             pose_cov = [0.0] * 21
             pose_cov[0] = pose_cov[6] = pose_cov[11] = sigma ** 2     # x, y, z variance
             pose_cov[15] = pose_cov[18] = pose_cov[20] = 0.01         # roll, pitch, yaw variance
