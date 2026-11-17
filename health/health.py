@@ -1,4 +1,4 @@
-# health.py
+# health/health.py
 # Decides how much to TRUST each tracker result. Output: a quality score that
 # goes straight into the ODOMETRY message's "quality" field:
 #   -1      = failed, the autopilot must ignore this measurement
@@ -6,6 +6,19 @@
 #
 # Checks: lighting, blur, frozen camera, tracker failure, too few points,
 #         too many outliers, points bunched in one corner, sudden jumps, height jumps.
+
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   A referee for every frame: is the picture too dark, too blurry, frozen? Did enough
+#   ground points agree, spread across the picture? Did the drone "teleport"? It gives a
+#   trust score 1..100 that the autopilot uses to weigh our position, and a status
+#   OK / DEGRADED / LOST with a delay (hysteresis) so trust doesn't flicker on and off.
+# REFERENCES
+#   - Pech-Pacheco et al., "Diatom autofocusing in brightfield microscopy: a comparative
+#     study", ICPR 2000 (variance of the Laplacian as a sharpness measure).
+#   - MAVLink ODOMETRY quality field: https://mavlink.io/en/messages/common.html#ODOMETRY
+#   - Extra checks added AROUND it (not inside): fusion/imu_check.py, recovery/.
+# -------------------------------------------------------------------------------------
 
 import math
 from dataclasses import dataclass, field

@@ -1,13 +1,20 @@
-# test_tracker.py
+# tests/test_tracker.py
 # Fake drone video with a KNOWN motion, so we can check tracker.py + health.py
 # give the right answer (and the right SIGN) before anything flies.
-# Run:  python test_tracker.py
+# Run (from the repo root):  python -m tests.test_tracker
+
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   Saumya's original proof: a fake ground picture is moved and turned by KNOWN amounts,
+#   and the tracker must report exactly that (error < 1 px), with the right directions,
+#   and health.py must react correctly to blur, freezing, darkness and blank floors.
+# -------------------------------------------------------------------------------------
 
 import math
 import cv2
 import numpy as np
-from tracker import GroundTracker, to_north_east, load_calibration
-from health import HealthChecker
+from vision.tracker import GroundTracker, to_north_east, load_calibration
+from health.health import HealthChecker
 
 W, H = 640, 480
 rng = np.random.default_rng(0)

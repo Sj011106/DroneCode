@@ -1,4 +1,4 @@
-# fake_vision.py
+# tools/fake_vision.py  (Windows-only: uses msvcrt for keys)
 # Pretends to be a camera: sends the drone its position over MAVLink,
 # so the drone can hold position WITHOUT GPS.
 #
@@ -9,12 +9,21 @@
 #   Later, we replace this with the real output of ground_lock.py.
 #
 # Run Mission Planner's simulator FIRST, with the drone still ON THE GROUND.
-# Then:  py fake_vision.py
+# Then:  py -m tools.fake_vision
 #
 # Keys (click the terminal first):
 #   v = switch the drone to use OUR vision position (EKF source set 2)
 #   g = switch back to GPS (EKF source set 1)
 #   q = quit (vision stops -> drone will lose position!)
+
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   A stand-in for the camera when testing in the simulator: it takes the simulator's
+#   true position, adds a little noise, and sends it as if vision had measured it.
+#   Useful to test the autopilot side (EKF settings, source switching) on its own.
+# REFERENCES
+#   - ArduPilot SITL: https://ardupilot.org/dev/docs/sitl-simulator-software-in-the-loop.html
+# -------------------------------------------------------------------------------------
 
 import math
 import random

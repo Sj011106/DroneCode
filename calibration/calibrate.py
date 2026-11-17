@@ -1,12 +1,22 @@
-# calibrate.py
+# calibration/calibrate.py
 # Step 2: measure your camera's lens so pixels can be turned into real distances.
 #
 # What you need: a printed checkerboard (search "OpenCV checkerboard 9x6 pdf"),
 # taped flat on a book or cardboard.
 #
-# How to run:  python calibrate.py
+# How to run (from the repo root, so calib.npz lands there):  python -m calibration.calibrate
 # Keys:  c = capture this view (do ~15 from different angles/distances)
 #        q = finish and calculate
+
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   Every lens bends the picture a little and has its own "zoom" (focal length). Showing
+#   it a checkerboard of known size from many angles measures both, so pixels can be
+#   turned into real distances. Result: calib.npz (K = lens matrix, dist = lens bending).
+# REFERENCES
+#   - Zhang, "A Flexible New Technique for Camera Calibration", IEEE TPAMI 2000.
+#   - OpenCV tutorial: https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
+# -------------------------------------------------------------------------------------
 
 import cv2
 import numpy as np

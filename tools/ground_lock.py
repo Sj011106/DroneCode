@@ -1,11 +1,19 @@
-# ground_lock.py
+# tools/ground_lock.py  (old ORB version, kept for reference; vision/tracker.py replaced it)
 # Step 3: the "ground lock" — measure how far we've drifted from the hold point.
 #
 # How to run:
-#   python ground_lock.py            -> uses your webcam (point it at the floor/table)
-#   python ground_lock.py video.mp4  -> uses a video you filmed with your phone
+#   python -m tools.ground_lock            -> uses your webcam (point it at the floor/table)
+#   python -m tools.ground_lock video.mp4  -> uses a video you filmed with your phone
 #
 # Keys:  r = save reference (start the hold)   q = quit
+
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   The team's FIRST hold-point measurer (ORB feature matching against a saved picture).
+#   vision/tracker.py replaced it for flying; its matching idea lives on in recovery.py.
+# REFERENCES
+#   - Rublee et al., "ORB: an efficient alternative to SIFT or SURF", ICCV 2011.
+# -------------------------------------------------------------------------------------
 
 import sys
 import os

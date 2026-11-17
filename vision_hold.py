@@ -19,26 +19,49 @@
 #   EK3_SRC2_VELXY = 0 to start with, VISO_QUAL_MIN = lowest quality you trust (e.g. 30)
 # The program reads some of these at start-up and warns you if they look wrong.
 
-import os
-os.environ["MAVLINK20"] = "1"      # ODOMETRY's "quality" field only exists in MAVLink 2
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   The main program that flies. For every camera frame: work out how far we've slid
+#   from home, decide how much to trust it, correct it for tilt and rolling shutter, and
+#   send it to the autopilot, which blends it with its own IMU and barometer (EKF3) to
+#   hold position. Lines marked "NEW" were added on top of Saumya's original flow; each
+#   addition has an on/off switch in config.py.
+# PIPELINE
+#   camera -> tracker (+ rolling-shutter fix) -> health -> IMU check -> recovery
+#          -> tilt cancel -> metres (filtered height) -> ODOMETRY -> ArduPilot EKF3
+# REFERENCES
+#   - ArduPilot non-GPS navigation: https://ardupilot.org/copter/docs/common-non-gps-navigation-landing-page.html
+#   - ArduPilot EKF source switching: https://ardupilot.org/copter/docs/common-ekf-sources.html
+#   - MAVLink ODOMETRY: https://mavlink.io/en/messages/common.html#ODOMETRY
+# -------------------------------------------------------------------------------------
 
 import argparse
 import csv
-import math
-import threading
+import os
 import time
-from collections import deque
+import math
 
 import cv2
 import numpy as np
-from pymavlink import mavutil
 
-from tracker import GroundTracker, load_calibration, to_north_east
-from health import HealthChecker
+from vision.tracker import load_calibration, to_north_east
+from health.health import HealthChecker
+from link.drone_link import DroneLink, SRC_GPS, SRC_VISION
+
+# NEW (added on top of Saumya's pipeline; each one can be switched off in config.py):
+import config
+from compute.budget import FrameBudget, make_low_latency
+from compute.profiler import Profiler
+from fusion.height import HeightFilter
+from fusion.imu_check import ImuCheck
+from fusion.tilt import cancel_tilt
+from recovery.failsafe import Failsafe
+from recovery.recovery import Recovery
+from vision.rolling_shutter import RollingShutterTracker
+from vision.timing import load_timing
 
 # ---------------- Settings ----------------
 CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttyAMA0" or "COM5"
-BAUD = 921600                        # only used for serial connections
 
 HOME_TRIGGER = "mode"   # when to save HOME (replaces the 'r' key):
                         #  "mode"  = when the pilot switches into a mode in HOLD_MODES
@@ -51,25 +74,10 @@ MIN_HOME_CORNERS = 50               # don't save home over a blank floor
 
 FALLBACK_TO_GPS = True   # LOST -> switch the autopilot back to GPS (needs a GPS fitted)
 MIN_HEIGHT_M = 0.3       # below this the picture is too close / we're landing -> don't send
-HEIGHT_TIMEOUT_S = 0.5   # height readings older than this are not trusted
 MAX_SECONDS = None       # stop after this long (None = run until Ctrl+C)
-
-# EKF origin: ANY fixed place works, it just has to be set once without a GPS.
-ORIGIN_LAT, ORIGIN_LON, ORIGIN_ALT_M = 45.4215, -75.6972, 70.0   # Ottawa
-
-SRC_GPS, SRC_VISION = 1, 2
 
 
 # ---------------- Small maths helpers ----------------
-def euler_to_quaternion(roll, pitch, yaw):
-    """(roll, pitch, yaw) in radians -> quaternion [w, x, y, z] (what MAVLink wants)."""
-    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
-    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
-    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
-    return [cr * cp * cy + sr * sp * sy, sr * cp * cy - cr * sp * sy,
-            cr * sp * cy + sr * cp * sy, cr * cp * sy - sr * sp * cy]
-
-
 def ned_to_body(v_ned, roll, pitch, yaw):
     """Turn a North/East/Down velocity into the drone's Forward/Right/Down axes."""
     cr, sr, cp, sp = math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch)
@@ -78,138 +86,6 @@ def ned_to_body(v_ned, roll, pitch, yaw):
                   [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
                   [-sp, sr * cp, cr * cp]])
     return R.T @ np.asarray(v_ned)                                           # NED -> body
-
-
-# ---------------- Talking to the autopilot ----------------
-class DroneLink:
-    """Keeps the newest autopilot data up to date in the background, and sends our messages."""
-
-    def __init__(self, connection):
-        self.conn = mavutil.mavlink_connection(connection, baud=BAUD, autoreconnect=True)
-        self.send_lock = threading.Lock()
-        self.attitudes = deque(maxlen=200)   # (local time, roll, pitch, yaw) ~4 s of history
-        self.rangefinder = None              # (local time, metres)
-        self.local_z = None                  # (local time, z) from LOCAL_POSITION_NED (down = +)
-        self.rc = {}                         # channel number -> PWM
-        self.origin_set = False
-        self.acked_source = None             # source set the autopilot CONFIRMED
-        self.pending_source = None           # source set we last ASKED for
-        self.params = {}
-        self.running = True
-
-    def start(self):
-        print(f"Connecting to {self.conn.address} ...")
-        self.send_heartbeat()                # say hello first (needed for UDP links)
-        self.conn.wait_heartbeat()
-        print(f"Connected to system {self.conn.target_system}")
-        threading.Thread(target=self._reader, daemon=True).start()
-        # Ask ONLY for what we need (not MAV_DATA_STREAM_ALL, which floods slow radio links)
-        for msg_id, hz in ((30, 50), (32, 10), (132, 20), (65, 10)):  # ATTITUDE, LOCAL_POS, DIST, RC
-            self.command(mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, msg_id, int(1e6 / hz))
-
-    def _reader(self):
-        """Background thread: read every message and keep the newest values."""
-        while self.running:
-            msg = self.conn.recv_match(blocking=True, timeout=0.5)
-            if msg is None:
-                continue
-            kind, now = msg.get_type(), time.time()
-            if kind == "ATTITUDE":
-                self.attitudes.append((now, msg.roll, msg.pitch, msg.yaw))
-            elif kind == "DISTANCE_SENSOR":
-                d = msg.current_distance / 100.0
-                if msg.min_distance / 100.0 <= d <= msg.max_distance / 100.0:
-                    self.rangefinder = (now, d)
-            elif kind == "LOCAL_POSITION_NED":
-                self.local_z = (now, msg.z)
-            elif kind == "RC_CHANNELS":
-                self.rc = {i: getattr(msg, f"chan{i}_raw") for i in range(1, 17)}
-            elif kind == "GPS_GLOBAL_ORIGIN":
-                self.origin_set = True
-            elif kind == "PARAM_VALUE":
-                self.params[msg.param_id] = msg.param_value
-            elif kind == "COMMAND_ACK" and msg.command == mavutil.mavlink.MAV_CMD_SET_EKF_SOURCE_SET:
-                if msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                    self.acked_source = self.pending_source
-            elif kind == "STATUSTEXT":
-                print(f"[drone] {msg.text}")
-
-    # ----- sending -----
-    def command(self, cmd, p1=0, p2=0):
-        with self.send_lock:
-            self.conn.mav.command_long_send(self.conn.target_system, self.conn.target_component,
-                                            cmd, 0, p1, p2, 0, 0, 0, 0, 0)
-
-    def send_heartbeat(self):
-        with self.send_lock:
-            self.conn.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
-                                         mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
-
-    def set_origin(self):
-        """Tell the EKF where 'zero' is. Without a GPS nobody else will."""
-        with self.send_lock:
-            self.conn.mav.set_gps_global_origin_send(
-                self.conn.target_system, int(ORIGIN_LAT * 1e7), int(ORIGIN_LON * 1e7),
-                int(ORIGIN_ALT_M * 1000), int(time.time() * 1e6))
-
-    def set_source(self, n):
-        """Replaces the 'v' / 'g' keys: 1 = GPS, 2 = our vision."""
-        self.pending_source = n
-        self.command(mavutil.mavlink.MAV_CMD_SET_EKF_SOURCE_SET, n)
-        print(f">>> asked autopilot to use {'VISION' if n == SRC_VISION else 'GPS'} (source set {n})")
-
-    def send_odometry(self, t_capture, north, east, down, att, vel_body, quality, reset_counter):
-        roll, pitch, yaw = att
-        if quality > 0:
-            sigma = 0.02 + 0.3 * (1 - quality / 100)        # metres: better quality = smaller
-            pose_cov = [0.0] * 21
-            pose_cov[0] = pose_cov[6] = pose_cov[11] = sigma ** 2     # x, y, z variance
-            pose_cov[15] = pose_cov[18] = pose_cov[20] = 0.01         # roll, pitch, yaw variance
-        else:
-            pose_cov = [float("nan")] + [0.0] * 20                    # "unknown"
-        with self.send_lock:
-            self.conn.mav.odometry_send(
-                int(t_capture * 1e6),
-                mavutil.mavlink.MAV_FRAME_LOCAL_FRD, mavutil.mavlink.MAV_FRAME_BODY_FRD,
-                north, east, down, euler_to_quaternion(roll, pitch, yaw),
-                float(vel_body[0]), float(vel_body[1]), float(vel_body[2]),
-                float("nan"), float("nan"), float("nan"),
-                pose_cov, [float("nan")] + [0.0] * 20,
-                reset_counter, mavutil.mavlink.MAV_ESTIMATOR_TYPE_VISION, int(quality))
-
-    # ----- reading -----
-    def attitude_at(self, t):
-        """The roll/pitch/yaw reading closest in time to t (the frame's capture time)."""
-        if not self.attitudes:
-            return None
-        return min(self.attitudes, key=lambda a: abs(a[0] - t))[1:]
-
-    def height(self, now):
-        """Height above ground: rangefinder if fresh, else the autopilot's barometer height."""
-        if self.rangefinder and now - self.rangefinder[0] < HEIGHT_TIMEOUT_S:
-            return self.rangefinder[1]
-        if self.local_z and now - self.local_z[0] < HEIGHT_TIMEOUT_S:
-            return -self.local_z[1]
-        return None
-
-    def check_params(self):
-        """Read a few autopilot settings and warn if they look wrong. Never blocks flight."""
-        wanted = {"VISO_TYPE": "not 0", "EK3_SRC2_POSXY": 6, "EK3_SRC2_POSZ": "1 or 2"}
-        for name in wanted:
-            with self.send_lock:
-                self.conn.mav.param_request_read_send(self.conn.target_system,
-                                                      self.conn.target_component,
-                                                      name.encode(), -1)
-        time.sleep(1.5)
-        p = self.params
-        if p.get("VISO_TYPE", 1) == 0:
-            print("WARNING: VISO_TYPE = 0 -> the autopilot will IGNORE our position")
-        if "EK3_SRC2_POSXY" in p and int(p["EK3_SRC2_POSXY"]) != 6:
-            print("WARNING: EK3_SRC2_POSXY should be 6 (ExternalNav)")
-        if "EK3_SRC2_POSZ" in p and int(p["EK3_SRC2_POSZ"]) not in (1, 2):
-            print("WARNING: EK3_SRC2_POSZ should be 1 (Baro) or 2 (Rangefinder), never our vision")
-        if not p:
-            print("(could not read parameters - check them by hand)")
 
 
 # ---------------- The home trigger (replaces the 'r' key) ----------------
@@ -256,9 +132,19 @@ def main():
         link.running = False
         return
     frame_gap = 0.0 if is_camera else 1.0 / (cap.get(cv2.CAP_PROP_FPS) or 30)  # play videos in real time
+    if is_camera:                                                # NEW: no stale frames in the queue
+        print(f"Camera 1-frame queue: {'yes' if make_low_latency(cap) else 'not supported by this backend'}")
 
     K, dist = load_calibration()
-    tracker, health = GroundTracker(K, dist), HealthChecker()
+    # NEW: Saumya's GroundTracker + rolling-shutter correction (identical if switched off)
+    timing = load_timing()
+    print(f"Rolling shutter: {'ON' if config.USE_ROLLING_SHUTTER else 'OFF'}, {timing}")
+    tracker = RollingShutterTracker(K, dist, attitude_history=link.attitudes, timing=timing)
+    health = HealthChecker()
+    imu_check, height_filter = ImuCheck(), HeightFilter()        # NEW
+    recovery, failsafe = Recovery(tracker), Failsafe()           # NEW
+    prof, budget = Profiler(budget_ms=1000 / config.TARGET_FPS), FrameBudget()   # NEW
+    home_att = None                                              # NEW: attitude when HOME was saved
     trigger = HomeTrigger(args.trigger)
     fallback = FALLBACK_TO_GPS and not args.no_gps_fallback
 
@@ -267,7 +153,10 @@ def main():
     log_file = open(log_path, "w", newline="")
     log = csv.writer(log_file)
     log.writerow(["t_capture", "status", "quality", "north_m", "east_m", "height_m", "shift_x_px",
-                  "shift_y_px", "rotation_deg", "inliers", "source", "reasons"])
+                  "shift_y_px", "rotation_deg", "inliers", "source", "reasons",
+                  # NEW columns (tools/analyze_log.py plots these)
+                  "corr_x_px", "corr_y_px", "imu_err_deg", "relocks",
+                  "ms_grab", "ms_track", "ms_health", "ms_fusion", "ms_send", "ms_total"])
 
     home_saved, home_pending, reset_counter, last_texture_warn = False, False, 0, 0.0
     want_source, last_source_try = None, 0.0
@@ -290,6 +179,7 @@ def main():
             if frame_gap:                                        # video file: wait for its moment
                 time.sleep(max(0.0, next_frame - time.time()))
                 next_frame += frame_gap
+            prof.start_frame()                                   # NEW: after the video pacing wait
             ok, frame = cap.read()
             t_capture = time.time()
             if not ok:
@@ -306,14 +196,19 @@ def main():
                 continue
             last_frame_ok = t_capture
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            t_frame = timing.mid_time(t_capture)                 # NEW: real capture time (= t_capture until calibrated)
+            prof.lap("grab")                                     # NEW
 
             # ---------- 2. Home trigger (replaces 'r') ----------
             if trigger.fired(link):
                 home_pending = True                              # try on this frame and the next ones
             if home_pending:
-                n = tracker.set_reference(gray)
+                n = tracker.set_reference(gray, t_capture)       # NEW: t_capture -> rolling-shutter fix on home too
                 if n >= MIN_HOME_CORNERS:
                     health.reset()
+                    home_att = link.attitude_at(t_frame)         # NEW: for tilt + IMU check
+                    imu_check.set_home(home_att[2] if home_att else None)
+                    recovery.set_home(gray)                      # NEW: fingerprints for re-finding home
                     home_saved, home_pending = True, False
                     reset_counter = (reset_counter + 1) % 256    # tells the EKF "position jumped to 0"
                     prev_ne, vel_ned = None, np.zeros(3)
@@ -325,17 +220,40 @@ def main():
                 continue
 
             # ---------- 3. Measure + judge ----------
-            att = link.attitude_at(t_capture) or (0.0, 0.0, 0.0)
+            att_real = link.attitude_at(t_frame)                 # NEW: t_frame, and None = no IMU data
+            att = att_real or (0.0, 0.0, 0.0)
             res = tracker.track(gray, t_capture, attitude=att)
+            prof.lap("track")                                    # NEW
             rep = health.check(gray, res)
+            prof.lap("health")                                   # NEW
             height = args.fixed_height if args.fixed_height else link.height(t_capture)
+            if not args.fixed_height and config.USE_HEIGHT_FILTER:   # NEW: smooth, ignore spikes
+                height = height_filter.update(t_capture, height)
             quality = rep.quality
             if height is None or height < MIN_HEIGHT_M:
                 quality = -1                                     # can't turn pixels into metres
 
+            # NEW: vision must agree with the IMU about how much we turned since home
+            imu_err = 0.0
+            if config.USE_IMU_CHECK and res.ok and att_real:
+                agree, imu_err = imu_check.check(res.rotation_deg, att_real[2])
+                if not agree:
+                    quality = -1
+                    rep.reasons.append(f"vision/IMU disagree ({imu_err:+.1f} deg)")
+
+            # NEW: lost and failing -> try to re-find home (tracker.relock)
+            if config.USE_RECOVERY and recovery.update(gray, rep.status == "LOST" and health.bad_count > 0):
+                print(f"Re-found HOME (re-lock #{recovery.relocks})")
+
+            # NEW: remove the fake shift caused by roll/pitch
+            shift = res.shift_px
+            if config.USE_TILT and res.ok and att_real and home_att:
+                shift = cancel_tilt(res.shift_px, att_real, home_att, tracker.focal_px, res.rotation_deg)
+            prof.lap("fusion")                                   # NEW
+
             north = east = float("nan")
             if quality > 0:
-                north, east = to_north_east(res.shift_px, height, tracker.focal_px, att[2])
+                north, east = to_north_east(shift, height, tracker.focal_px, att[2])   # NEW: shift (was res.shift_px)
                 if prev_ne is not None and t_capture > prev_ne[2]:   # smooth velocity estimate
                     dt = t_capture - prev_ne[2]
                     v = np.array([(north - prev_ne[0]) / dt, (east - prev_ne[1]) / dt, 0.0])
@@ -347,6 +265,7 @@ def main():
             send_n, send_e = (north, east) if quality > 0 else (0.0, 0.0)
             link.send_odometry(t_capture, send_n, send_e, down, att,
                                ned_to_body(vel_ned, *att), quality, reset_counter)
+            prof.lap("send")                                     # NEW
 
             # ---------- 5. Source switching (replaces 'v' and 'g') ----------
             if rep.status == "OK" and quality > 0:
@@ -357,10 +276,26 @@ def main():
                 link.set_source(want_source)                     # retried until the autopilot says OK
                 last_source_try = now
 
+            # NEW: vision lost for too long while the autopilot relies on it -> safe mode
+            action = failsafe.update(rep.status == "LOST" and link.acked_source == SRC_VISION, now)
+            if action:
+                print(f"FAILSAFE: vision lost for {config.FAILSAFE_AFTER_S:.0f} s -> switching to {action}")
+                with link.send_lock:
+                    link.conn.set_mode(action)
+
+            loop_ms = prof.end_frame()                           # NEW
+            ms = prof.current
             log.writerow([f"{t_capture:.3f}", rep.status, quality,
                           f"{north:.3f}", f"{east:.3f}", height,
                           f"{res.shift_px[0]:.2f}" if res.ok else "", f"{res.shift_px[1]:.2f}" if res.ok else "",
-                          f"{res.rotation_deg:.2f}", res.n_inliers, link.acked_source, "; ".join(rep.reasons)])
+                          f"{res.rotation_deg:.2f}", res.n_inliers, link.acked_source, "; ".join(rep.reasons),
+                          # NEW columns
+                          f"{shift[0]:.2f}" if res.ok else "", f"{shift[1]:.2f}" if res.ok else "",
+                          f"{imu_err:.2f}", recovery.relocks,
+                          *(f"{ms.get(s, 0.0):.2f}" for s in ("grab", "track", "health", "fusion", "send", "total"))])
+            if is_camera:                                        # NEW: fell behind -> drop stale frames
+                for _ in range(budget.frames_to_drop(loop_ms / 1000)):
+                    cap.grab()
 
             if args.show:
                 text = f"{rep.status} q={quality} N={north:+.2f} E={east:+.2f} src={link.acked_source}"
@@ -386,6 +321,8 @@ def main():
         cap.release()
         log_file.close()
         cv2.destroyAllWindows()
+        if prof.frames:                                          # NEW: compute summary for the slide
+            print(f"\n{prof.table()}\nRe-locks: {recovery.relocks}, stale frames dropped: {budget.dropped}")
         print(f"Done. Log saved to {log_path}")
 
 

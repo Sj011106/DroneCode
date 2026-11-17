@@ -1,4 +1,4 @@
-# auto_calibrate.py
+# calibration/auto_calibrate.py
 # Hands-free camera calibration: the automatic version of calibrate.py.
 # No 'c' or 'q' keys:
 #   - it takes a snapshot BY ITSELF whenever the checkerboard is fully visible,
@@ -6,14 +6,23 @@
 #   - it finishes BY ITSELF after TARGET_VIEWS snapshots (or when time runs out).
 #
 # How to run:
-#   python auto_calibrate.py               -> camera 0
-#   python auto_calibrate.py 1             -> camera 1 (e.g. the drone camera)
-#   python auto_calibrate.py video.mp4     -> a video you recorded of the board
+#   python -m calibration.auto_calibrate               -> camera 0
+#   python -m calibration.auto_calibrate 1             -> camera 1 (e.g. the drone camera)
+#   python -m calibration.auto_calibrate video.mp4     -> a video you recorded of the board
 #   add  --no-window  on a computer without a screen (e.g. the drone)
 #
 # What YOU do: slowly move the checkerboard (or the camera) around:
 #   near and far, tilted left/right/up/down, and into every corner of the picture.
 #   Pause for a moment in each new spot. The program does the rest.
+
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   Same as calibrate.py (measures the lens), but takes the checkerboard photos by itself
+#   when the board is sharp, still and in a new position, so it can run on the drone.
+# REFERENCES
+#   - Zhang, "A Flexible New Technique for Camera Calibration", IEEE TPAMI 2000.
+#   - OpenCV tutorial: https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
+# -------------------------------------------------------------------------------------
 
 import argparse
 import time

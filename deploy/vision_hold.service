@@ -1,0 +1,32 @@
+# =====================================================================================
+# deploy/vision_hold.service  -  start vision_hold.py automatically on the APB
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS
+#   Tells Linux: "when the board boots, start our program; if it ever crashes, start it
+#   again after 2 seconds". No keyboard or screen needed on the drone.
+#   install.sh fills in @USER@ and @DIR@ and installs this file.
+#   Edit ExecStart for the real serial port / camera once the spec is known.
+#
+# Useful commands on the board:
+#   sudo systemctl status vision_hold     # running? last lines of output
+#   journalctl -u vision_hold -f          # live output
+#   sudo systemctl stop vision_hold       # stop (e.g. to run tests by hand)
+#
+# REFERENCE: systemd.service manual, https://www.freedesktop.org/software/systemd/man/systemd.service.html
+# =====================================================================================
+
+[Unit]
+Description=Vision position hold (GNSS-denied)
+After=network.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+# --no-gps-fallback: GNSS is jammed/spoofed in the trial; switching back to it could fly away.
+ExecStart=@DIR@/venv/bin/python vision_hold.py --connect /dev/ttyAMA0 --camera 0 --trigger rc --no-gps-fallback
+Restart=on-failure
+RestartSec=2
+Nice=-10
+
+[Install]
+WantedBy=multi-user.target

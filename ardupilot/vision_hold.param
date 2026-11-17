@@ -1,0 +1,112 @@
+# =====================================================================================
+# ardupilot/vision_hold.param  -  ArduPilot (Copter 4.3+) settings for GNSS-denied vision hold
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS
+#   Our program on the APB works out "how far are we from home". The flight controller
+#   (ArduPilot) does the actual flying. These settings tell ArduPilot:
+#     - to LISTEN to our vision position (it ignores it by default),
+#     - to keep TWO sets of sensors: set 1 = GPS (normal), set 2 = our vision; our
+#       program switches between them over MAVLink,
+#     - to NEVER take height or heading from vision (barometer + compass do that),
+#     - to fly gently while holding (small tilts = clearer pictures = better tracking),
+#     - to LAND if its own position estimate falls apart.
+#
+# HOW TO LOAD
+#   On the APB (no Mission Planner needed):  python -m ardupilot.load_params --connect /dev/ttyAMA0
+#   Or Mission Planner: Config -> Full Parameter List -> Load from file -> Write Params.
+#   Then REBOOT the flight controller (several of these only apply after a reboot).
+#   Check any time:  python -m ardupilot.load_params --verify   (link/check_link.py does too)
+#
+# FLIGHT PROCEDURE THESE SETTINGS ASSUME
+#   1. Take off in ALT_HOLD (needs no position).
+#   2. Over textured ground, flip RC channel 7 -> vision_hold.py saves HOME.
+#   3. When health is OK, vision_hold.py switches the EKF to source set 2 (vision).
+#   4. Pilot switches to LOITER -> ArduPilot holds position using our vision.
+#   5. Vision lost > 3 s -> our failsafe LANDs; EKF failsafe below is the backup.
+#   Run vision_hold.py with --no-gps-fallback in the trial: GNSS is jammed/spoofed, and
+#   switching back to a SPOOFED GPS would fly the drone away (deploy/vision_hold.service does).
+#
+# FORMAT
+#   NAME,VALUE   one per line; '#' starts a comment. Lines starting with '#NAME,' are
+#   hardware-specific: fill in from the technical spec, then remove the '#'.
+#
+# REFERENCES
+#   - Non-GPS navigation: https://ardupilot.org/copter/docs/common-non-gps-navigation-landing-page.html
+#   - EKF source selection and switching: https://ardupilot.org/copter/docs/common-ekf-sources.html
+#   - External navigation (VISO_*): https://ardupilot.org/copter/docs/common-vio-tracking-camera.html
+#   - EKF failsafe: https://ardupilot.org/copter/docs/ekf-inav-failsafe.html
+#   - Full parameter list: https://ardupilot.org/copter/docs/parameters.html
+# =====================================================================================
+
+# ---------------- 1. Use EKF3 (the filter that accepts external navigation) ----------------
+AHRS_EKF_TYPE,3          # use EKF3 (reboot)
+EK3_ENABLE,1             # EKF3 on (reboot)
+EK2_ENABLE,0             # EKF2 off: saves CPU on the flight controller (reboot)
+AHRS_GPS_USE,0           # backup attitude estimator (DCM) must not trust a jammed/spoofed GPS
+
+# ---------------- 2. Listen to our vision (VISO = Visual Odometry) ----------------
+VISO_TYPE,1              # 1 = MAVLink: accept the ODOMETRY messages vision_hold.py sends (reboot)
+VISO_ORIENT,0            # 0 = as sent: we already rotate into North/East (tracker.to_north_east)
+VISO_SCALE,1             # we already convert pixels to metres with the height
+VISO_POS_X,0             # camera position on the frame, metres forward of the centre of gravity
+VISO_POS_Y,0             #   ... metres to the right    (measure on the M2-AI, a few cm matter little)
+VISO_POS_Z,0             #   ... metres below
+VISO_DELAY_MS,50         # how old our position is when it arrives: camera delay + processing.
+                         # Tune: -offset from timing.npz (calibrate_timing) + mean ms_total from
+                         # the flight log + ~5 ms link. Too low or too high = oscillation in LOITER.
+VISO_POS_M_NSE,0.1       # position noise (m) the EKF assumes for us: lower = trusts us more
+VISO_VEL_M_NSE,0.1       # velocity noise (m/s); only used if EK3_SRC2_VELXY = 6
+VISO_YAW_M_NSE,0.2       # yaw noise (rad); unused: yaw comes from the compass (EK3_SRC2_YAW)
+VISO_QUAL_MIN,30         # ignore our messages with quality below 30 (health.py score, -1 = bad)
+
+# ---------------- 3. Source set 1 = GPS (normal flying, take-off area) ----------------
+EK3_SRC1_POSXY,3         # horizontal position: GPS
+EK3_SRC1_VELXY,3         # horizontal velocity: GPS
+EK3_SRC1_POSZ,1          # height: barometer
+EK3_SRC1_VELZ,3          # vertical velocity: GPS
+EK3_SRC1_YAW,1           # heading: compass
+
+# ---------------- 4. Source set 2 = OUR VISION (vision_hold.py switches to this) ----------------
+EK3_SRC2_POSXY,6         # horizontal position: ExternalNav = us
+EK3_SRC2_VELXY,0         # horizontal velocity: none (start here; try 6 once position fusion is solid)
+EK3_SRC2_POSZ,1          # height: barometer (2 = rangefinder if fitted and in range). NEVER vision:
+                         # our height comes FROM the barometer/rangefinder, it would be circular
+EK3_SRC2_VELZ,0          # vertical velocity: none (EKF uses IMU + baro)
+EK3_SRC2_YAW,1           # heading: compass. NOT vision: the attitude we send is ArduPilot's own
+EK3_SRC_OPTIONS,0        # do NOT fuse velocities from all sets: default (1) would keep fusing a
+                         # spoofed GPS velocity even while flying on vision
+
+# ---------------- 5. Gentle flying while holding (clearer pictures) ----------------
+ANGLE_MAX,2000           # max lean 20 deg (default 30): keeps the ground in view and keeps the
+                         # tilt fix accurate (its residual grows with tilt^2, see fusion/tilt.py)
+LOIT_SPEED,500           # LOITER max speed 5 m/s (default 12.5): small corrections, not dashes
+LOIT_ACC_MAX,250         # LOITER max acceleration 2.5 m/s^2 (default 5): smaller tilts
+
+# ---------------- 6. Safety ----------------
+FS_EKF_ACTION,1          # EKF position estimate bad -> LAND (backup to recovery/failsafe.py)
+FS_EKF_THRESH,0.8        # how bad before acting (default; lower = earlier, more false alarms)
+RC7_OPTION,0             # RC channel 7 is OUR home trigger (vision_hold.py HOME_RC_CHANNEL = 7):
+                         # ArduPilot must not use it for anything else
+
+# ---------------- 7. Hardware-specific: fill in from the technical spec ----------------
+# Companion computer (APB) link. WRONG PORT CAN DISABLE THE RC RECEIVER OR ESC TELEMETRY.
+#SERIAL2_PROTOCOL,2      # MAVLink 2 (ODOMETRY's quality field needs MAVLink 2)
+#SERIAL2_BAUD,921        # 921600 baud = link/drone_link.py BAUD
+#
+# GNSS: if the receiver is fitted but jammed/spoofed for the trial, disable it.
+#GPS_TYPE,0              # firmware 4.5 and older
+#GPS1_TYPE,0             # firmware 4.6 and newer
+#
+# Downward rangefinder (better height = better scale). Type from the spec.
+#RNGFND1_TYPE,0          # sensor type number, see ArduPilot rangefinder docs
+#RNGFND1_ORIENT,25       # 25 = pointing down
+#EK3_RNG_USE_HGT,70      # use rangefinder for height below 70% of its range (with POSZ = 1)
+#
+# Pilot override of the source set with a 3-position switch (optional; vision_hold.py
+# also switches by MAVLink, the last change wins):
+#RC8_OPTION,90           # 90 = EKF source set: low = 1 (GPS), middle = 2 (vision)
+#
+# Flight modes on the mode switch (pilot preference): 2 = ALT_HOLD, 5 = LOITER, 9 = LAND
+#FLTMODE1,2
+#FLTMODE4,5
+#FLTMODE6,9

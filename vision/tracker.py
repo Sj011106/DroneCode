@@ -1,4 +1,4 @@
-# tracker.py
+# vision/tracker.py
 # Ground tracker: Harris corners + Lucas-Kanade + forward-backward check + RANSAC.
 #
 # ======================= TEAM SIGN CONVENTION (read this!) =======================
@@ -11,9 +11,27 @@
 # ==================================================================================
 #
 # How to run the demo:
-#   python tracker.py            -> webcam (point it at the floor/table)
-#   python tracker.py video.mp4  -> a video file
+#   python -m vision.tracker            -> webcam (point it at the floor/table)
+#   python -m vision.tracker video.mp4  -> a video file
 # Keys:  r = save HOME (reference)   q = quit
+
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   When home is saved, the tracker picks ~300 sharp "corners" on the ground picture
+#   (pebbles, edges, marks). In every new frame it finds those same corners again, throws
+#   away any that don't come back cleanly (forward-backward check) or don't move like the
+#   rest (RANSAC), and from the ones that agree works out how far the drone has slid and
+#   turned since home. Output: a pixel shift that to_north_east() turns into metres.
+# REFERENCES
+#   - Harris & Stephens, "A Combined Corner and Edge Detector", Alvey Vision Conf. 1988.
+#   - Lucas & Kanade, "An Iterative Image Registration Technique with an Application to
+#     Stereo Vision", IJCAI 1981; Bouguet, "Pyramidal Implementation of the Lucas Kanade
+#     Feature Tracker", Intel 2000.
+#   - Kalal, Mikolajczyk, Matas, "Forward-Backward Error: Automatic Detection of Tracking
+#     Failures", ICPR 2010.
+#   - Fischler & Bolles, "Random Sample Consensus", Comm. ACM 1981.
+#   - Extended (not changed) by vision/rolling_shutter.py (RollingShutterTracker).
+# -------------------------------------------------------------------------------------
 
 import math
 import os
@@ -221,7 +239,7 @@ class GroundTracker:
 
 # ---------------- Demo: webcam / video ----------------
 def main():
-    from health import HealthChecker   # imported here so tracker.py works on its own too
+    from health.health import HealthChecker   # imported here so tracker.py works on its own too
 
     source = sys.argv[1] if len(sys.argv) > 1 else 0
     cap = cv2.VideoCapture(source)

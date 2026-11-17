@@ -1,6 +1,14 @@
-# read_drone.py
+# tools/read_drone.py
 # Connects to the simulated drone and prints where it thinks it is.
-# Run Mission Planner's simulator FIRST, then: py read_drone.py
+# Run Mission Planner's simulator FIRST, then: py -m tools.read_drone
+
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS (for non-technical readers)
+#   The simplest possible connection test: connect to the (simulated) drone and print
+#   where it thinks it is. If this works, the MAVLink link is fine.
+# REFERENCES
+#   - pymavlink: https://mavlink.io/en/mavgen_python/
+# -------------------------------------------------------------------------------------
 
 from pymavlink import mavutil
 

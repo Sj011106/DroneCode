@@ -1,0 +1,4 @@
+numpy
+opencv-python
+pymavlink
+matplotlib      # only for tools/analyze_log.py plots
