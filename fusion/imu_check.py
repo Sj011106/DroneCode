@@ -38,17 +38,21 @@ def wrap_deg(a):
 
 
 class ImuCheck:
-    def __init__(self, max_deg=config.IMU_CHECK_MAX_DEG):
-        self.max_deg = max_deg
+    def __init__(self, max_deg=None):
+        self.max_deg = config.IMU_CHECK_MAX_DEG if max_deg is None else max_deg   # read now: --set works
         self.home_yaw = None
 
     def set_home(self, yaw_rad):
-        """Call when HOME is saved (yaw at that moment, radians). None = no IMU data."""
+        """Call when HOME is saved (yaw at that moment, radians). None = no IMU data yet:
+        the home yaw is then taken from the first frame that has IMU data (see check)."""
         self.home_yaw = yaw_rad
 
     def check(self, rotation_deg, yaw_rad):
         """Returns (agree, error_deg). Agrees if there's nothing to compare against."""
-        if self.home_yaw is None or yaw_rad is None:
+        if yaw_rad is None:
+            return True, 0.0
+        if self.home_yaw is None:                     # home saved without IMU data: start the
+            self.home_yaw = yaw_rad + math.radians(rotation_deg)   # check from this frame
             return True, 0.0
         err = wrap_deg(rotation_deg + math.degrees(yaw_rad - self.home_yaw))
         return abs(err) <= self.max_deg, err

@@ -30,9 +30,10 @@ import config
 
 
 class HeightFilter:
-    def __init__(self, max_rate=config.HEIGHT_MAX_RATE_MPS, alpha=config.HEIGHT_SMOOTH,
-                 max_rejects=config.HEIGHT_MAX_REJECTS):
-        self.max_rate, self.alpha, self.max_rejects = max_rate, alpha, max_rejects
+    def __init__(self, max_rate=None, alpha=None, max_rejects=None):   # None = config.py (read now)
+        self.max_rate = config.HEIGHT_MAX_RATE_MPS if max_rate is None else max_rate
+        self.alpha = config.HEIGHT_SMOOTH if alpha is None else alpha
+        self.max_rejects = config.HEIGHT_MAX_REJECTS if max_rejects is None else max_rejects
         self.value = None       # filtered height, metres
         self.t = None           # time of the last ACCEPTED reading
         self.rejects = 0

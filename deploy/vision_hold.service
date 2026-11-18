@@ -2,15 +2,22 @@
 # deploy/vision_hold.service  -  start vision_hold.py automatically on the APB
 # -------------------------------------------------------------------------------------
 # IN PLAIN WORDS
-#   Tells Linux: "when the board boots, start our program; if it ever crashes, start it
+#   Tells Linux: "when the board boots, start our program; if it ever stops, start it
 #   again after 2 seconds". No keyboard or screen needed on the drone.
-#   install.sh fills in @USER@ and @DIR@ and installs this file.
-#   Edit ExecStart for the real serial port / camera once the spec is known.
+#   install.sh fills in @USER@ and @DIR@ and installs this file, but does NOT enable it:
+#   the service would grab the camera and the flight-controller port and fight every
+#   manual test. Enable it only for event day (docs/WORKLIST.md phase 4):
+#       sudo systemctl enable --now vision_hold
+#   APB values (DTK APB User Manual v1.7.2): flight controller = /dev/ttymxc2 (UART3),
+#   reachable only after the two gpioset commands below (p.14); Justice D = /dev/video2,
+#   given as --camera 2 (= /dev/video2).
+#   Add --record to ExecStart for practice flights (saves to /sdcard when a card is in).
 #
 # Useful commands on the board:
 #   sudo systemctl status vision_hold     # running? last lines of output
 #   journalctl -u vision_hold -f          # live output
-#   sudo systemctl stop vision_hold       # stop (e.g. to run tests by hand)
+#   sudo systemctl stop vision_hold       # ALWAYS before running anything by hand
+#   sudo systemctl disable vision_hold    # don't start at boot any more
 #
 # REFERENCE: systemd.service manual, https://www.freedesktop.org/software/systemd/man/systemd.service.html
 # =====================================================================================
@@ -23,8 +30,12 @@ After=network.target
 User=@USER@
 WorkingDirectory=@DIR@
 # --no-gps-fallback: GNSS is jammed/spoofed in the trial; switching back to it could fly away.
-ExecStart=@DIR@/venv/bin/python vision_hold.py --connect /dev/ttyAMA0 --camera 0 --trigger rc --no-gps-fallback
-Restart=on-failure
+# Route UART3 (/dev/ttymxc2) to the flight controller first (APB manual p.14):
+ExecStartPre=/usr/bin/env gpioset -t0 -c gpiochip3 13=1
+ExecStartPre=/usr/bin/env gpioset -t0 -c gpiochip3 0=0
+ExecStart=@DIR@/venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger rc --no-gps-fallback
+# always: also restart after a clean exit (e.g. "Camera lost for 5 s - stopping.")
+Restart=always
 RestartSec=2
 Nice=-10
 

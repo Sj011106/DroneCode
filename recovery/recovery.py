@@ -42,11 +42,11 @@ import config
 
 
 class Recovery:
-    def __init__(self, tracker, every_n=config.RECOVERY_EVERY_N_FRAMES,
-                 min_inliers=config.RECOVERY_MIN_INLIERS, n_features=config.RECOVERY_ORB_FEATURES):
+    def __init__(self, tracker, every_n=None, min_inliers=None, n_features=None):   # None = config.py
         self.tracker = tracker
-        self.every_n, self.min_inliers = every_n, min_inliers
-        self.orb = cv2.ORB_create(nfeatures=n_features)
+        self.every_n = config.RECOVERY_EVERY_N_FRAMES if every_n is None else every_n
+        self.min_inliers = config.RECOVERY_MIN_INLIERS if min_inliers is None else min_inliers
+        self.orb = cv2.ORB_create(nfeatures=config.RECOVERY_ORB_FEATURES if n_features is None else n_features)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         self.home_pts = self.home_des = None
         self.lost_frames = 0

@@ -32,9 +32,9 @@ from health.health import HealthChecker
 from tools.degrade_video import make_pyramid, make_terrain, render_mip
 from vision.enhance import enhance
 from vision.rolling_shutter import RollingShutterTracker
-from vision.tracker import load_calibration, to_north_east
+from vision.tracker import to_north_east
 
-K, _ = load_calibration()
+from tests.common import K                  # fixed test camera (not the repo's calib.npz)
 F = (K[0, 0] + K[1, 1]) / 2
 HEIGHTS = (5, 10, 20, 40, 80)
 N_FRAMES = 45

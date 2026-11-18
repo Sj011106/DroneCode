@@ -31,6 +31,8 @@ matplotlib.use("Agg")                    # no screen needed (works on the APB to
 import matplotlib.pyplot as plt
 import numpy as np
 
+import config
+
 STATUS_LEVEL = {"OK": 2, "DEGRADED": 1, "LOST": 0}
 STAGES = ("ms_grab", "ms_track", "ms_health", "ms_fusion", "ms_send")
 
@@ -109,7 +111,7 @@ def main():
         ms = np.array([[num(x) for x in cols[s]] for s in have])
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.stackplot(t, np.nan_to_num(ms), labels=[s[3:] for s in have])
-        fps = 30
+        fps = config.TARGET_FPS
         ax.axhline(1000 / fps, color="r", ls="--", label=f"budget ({fps} fps)")
         ax.set_ylabel("ms per frame"); ax.set_xlabel("time (s)"); ax.legend(loc="upper right"); ax.grid(alpha=.3)
         fig.suptitle("Onboard compute per frame")
@@ -119,8 +121,8 @@ def main():
     lost_spans = segments(t, ~ok)
     print(f"Log: {path}  ({t[-1]:.1f} s, {len(t)} frames)")
     print(f"Trusted (OK): {100 * ok.mean():.1f}% of frames")
-    if ok.any():
-        d = dist[ok & ~np.isnan(dist)]
+    d = dist[ok & ~np.isnan(dist)]                   # OK frames can still have no position (no height)
+    if d.size:
         print(f"Distance from home while OK: RMS {100 * np.sqrt(np.mean(d ** 2)):.1f} cm, "
               f"max {100 * d.max():.1f} cm (vision estimate)")
     if lost_spans:

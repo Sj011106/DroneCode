@@ -50,6 +50,7 @@ from health.health import HealthChecker
 from link.drone_link import DroneLink, SRC_GPS, SRC_VISION
 
 # NEW (added on top of Saumya's pipeline; each one can be switched off in config.py):
+import signal
 import config
 from compute.budget import FrameBudget, make_low_latency
 from compute.profiler import Profiler
@@ -58,10 +59,10 @@ from fusion.imu_check import ImuCheck
 from fusion.tilt import cancel_tilt
 from recovery.failsafe import Failsafe
 from recovery.recovery import Recovery
-from tools.replay import Recorder, Replay
-from vision.enhance import enhance
+from tools.replay import Recorder, Replay, auto_folder
+from vision.enhance import downscale, enhance, scale_camera_matrix
 from vision.rehome import Rehome
-from vision.rolling_shutter import RollingShutterTracker
+from vision.rolling_shutter import RollingShutterTracker, attitude_near
 from vision.timing import load_timing
 
 # ---------------- Settings ----------------
@@ -112,6 +113,11 @@ class HomeTrigger:
         return fired
 
 
+def _stop_on_sigterm(signum, frame):                            # NEW
+    """systemctl stop sends SIGTERM; turn it into Ctrl+C so the safe shutdown below runs."""
+    raise KeyboardInterrupt
+
+
 # ---------------- Main loop ----------------
 def main(argv=None):                                             # NEW: argv for tests
     ap = argparse.ArgumentParser(description="Automatic vision position hold")
@@ -124,7 +130,8 @@ def main(argv=None):                                             # NEW: argv for
     ap.add_argument("--show", action="store_true", help="show a preview window")
     ap.add_argument("--max-seconds", type=float, default=MAX_SECONDS)
     # NEW: record a flight, replay it through this same code, toggle settings for replays
-    ap.add_argument("--record", metavar="DIR", help="save video + times + attitude + height here")
+    ap.add_argument("--record", metavar="DIR", nargs="?", const="auto",   # NEW
+                    help="save video + times + attitude + height (no DIR: /sdcard/rec_<time> or logs/)")
     ap.add_argument("--replay", metavar="DIR", help="run on a recording instead of camera + drone")
     ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
                     help="override a config.py setting, e.g. --set USE_TILT=False")
@@ -136,6 +143,7 @@ def main(argv=None):                                             # NEW: argv for
             raise SystemExit(f"--set: config.py has no setting {name}")
         setattr(config, name, ast.literal_eval(value))
         print(f"config.{name} = {getattr(config, name)!r}")
+    signal.signal(signal.SIGTERM, _stop_on_sigterm)              # NEW: 'systemctl stop' -> safe shutdown
     replay = Replay(args.replay) if args.replay else None        # NEW
     clock = replay.clock if replay else time.time                # NEW: recorded time during replay
 
@@ -143,8 +151,8 @@ def main(argv=None):                                             # NEW: argv for
     link.start()
     link.check_params()
 
-    is_camera = args.camera.isdigit() and not replay              # NEW: not replay
-    cap = replay.cap if replay else cv2.VideoCapture(int(args.camera) if is_camera else args.camera)
+    is_camera = (args.camera.isdigit() or args.camera.startswith("/dev/video")) and not replay   # NEW
+    cap = replay.cap if replay else cv2.VideoCapture(int(args.camera) if args.camera.isdigit() else args.camera)
     if not cap.isOpened():
         print(f"Could not open camera/video '{args.camera}'. Check the number or file name.")
         link.running = False
@@ -152,10 +160,13 @@ def main(argv=None):                                             # NEW: argv for
     frame_gap = 0.0 if is_camera else 1.0 / (cap.get(cv2.CAP_PROP_FPS) or 30)  # play videos in real time
     if replay:
         frame_gap = 0.0                                          # NEW: replay as fast as possible
-    if is_camera:                                                # NEW: no stale frames in the queue
-        print(f"Camera 1-frame queue: {'yes' if make_low_latency(cap) else 'not supported by this backend'}")
+    low_latency = is_camera and make_low_latency(cap)            # NEW: no stale frames in the queue
+    if is_camera:                                                # NEW
+        print(f"Camera 1-frame queue: {'yes' if low_latency else 'not supported by this backend'}")
 
     K, dist = load_calibration()
+    if config.CALIB_FILE != "calib.npz":                         # NEW: tests use their own lens file
+        K, dist = load_calibration(config.CALIB_FILE)
     # NEW: Saumya's GroundTracker + rolling-shutter correction (identical if switched off)
     timing = load_timing()
     print(f"Rolling shutter: {'ON' if config.USE_ROLLING_SHUTTER else 'OFF'}, {timing}")
@@ -165,10 +176,15 @@ def main(argv=None):                                             # NEW: argv for
     imu_check, height_filter = ImuCheck(), HeightFilter()        # NEW
     recovery, failsafe = Recovery(tracker), Failsafe()           # NEW
     rehome = Rehome()                                            # NEW: new reference while climbing
-    prof, budget = Profiler(budget_ms=1000 / config.TARGET_FPS), FrameBudget()   # NEW
+    prof = Profiler(budget_ms=1000 / config.TARGET_FPS)          # NEW
+    budget = FrameBudget(camera_fps=cap.get(cv2.CAP_PROP_FPS) or None,          # NEW
+                         queue_len=1 if low_latency else 4)
     home_att = None                                              # NEW: attitude when HOME was saved
     trigger = replay.trigger if replay else HomeTrigger(args.trigger)   # NEW: recorded trigger in replay
-    recorder = Recorder(args.record) if args.record else None    # NEW
+    rec_dir = auto_folder() if args.record == "auto" else args.record   # NEW
+    recorder = Recorder(rec_dir) if rec_dir else None            # NEW
+    if recorder:                                                 # NEW
+        print(f"Recording to {rec_dir}")
     fallback = FALLBACK_TO_GPS and not args.no_gps_fallback
 
     os.makedirs("logs", exist_ok=True)
@@ -186,6 +202,7 @@ def main(argv=None):                                             # NEW: argv for
     last_heartbeat, last_origin_try, last_frame_ok = 0.0, 0.0, time.time()
     prev_ne, vel_ned = None, np.zeros(3)
     started, next_frame = time.time(), time.time()
+    k_scaled, imu_bad_streak = False, 0                          # NEW
     print(f"Running. Home trigger = '{args.trigger}'. Logging to {log_path}. Ctrl+C to stop.")
 
     try:
@@ -203,8 +220,11 @@ def main(argv=None):                                             # NEW: argv for
                 time.sleep(max(0.0, next_frame - time.time()))
                 next_frame += frame_gap
             prof.start_frame()                                   # NEW: after the video pacing wait
+            t_read = time.time()                                 # NEW: how long read() waits (budget)
             ok, frame = cap.read()
             t_capture = clock()                                  # NEW: was time.time()
+            if not ok and is_camera and home_saved:              # NEW: dead camera while on vision ->
+                failsafe.step(link.acked_source == SRC_VISION, t_capture, link)   # failsafe timer runs
             if not ok:
                 if not is_camera:
                     print("Video finished.")
@@ -218,21 +238,30 @@ def main(argv=None):                                             # NEW: argv for
                 time.sleep(0.05)
                 continue
             last_frame_ok = t_capture
-            gray = enhance(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))   # NEW: enhance() = contrast boost
+            small = downscale(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))   # NEW: PROCESS_WIDTH (APB CPU)
+            gray = enhance(small)                                # NEW: enhance() = contrast boost
+            if not k_scaled:                                     # NEW: lens K for the processed size
+                orig_w = (replay.orig_width if replay else None) or frame.shape[1]
+                tracker.K = scale_camera_matrix(K, small.shape[1] / orig_w)
+                k_scaled = True
             t_frame = timing.mid_time(t_capture)                 # NEW: real capture time (= t_capture until calibrated)
+            atts = list(link.attitudes)                          # NEW: ONE frozen IMU snapshot per frame:
+            tracker.history = atts                               # thread-safe, and replay sees exactly this
             prof.lap("grab")                                     # NEW
 
             # ---------- 2. Home trigger (replaces 'r') ----------
             fired = trigger.fired(link)                          # NEW: kept for the recorder
             if recorder:                                         # NEW: record raw inputs
-                recorder.add(frame, t_capture, fired, link.height(t_capture), link.attitudes)
+                recorder.add(small, t_capture, fired, link.height(t_capture), atts,
+                             orig_size=(frame.shape[1], frame.shape[0]))
             if fired:
                 home_pending = True                              # try on this frame and the next ones
+            old_ref = dict(tracker.__dict__) if home_pending and home_saved else None   # NEW
             if home_pending:
                 n = tracker.set_reference(gray, t_capture)       # NEW: t_capture -> rolling-shutter fix on home too
                 if n >= MIN_HOME_CORNERS:
                     health.reset()
-                    home_att = link.attitude_at(t_frame)         # NEW: for tilt + IMU check
+                    home_att = attitude_near(atts, t_frame)   # NEW: tilt + IMU check (thread-safe)
                     imu_check.set_home(home_att[2] if home_att else None)
                     recovery.set_home(gray)                      # NEW: fingerprints for re-finding home
                     rehome.reset()                               # NEW: positions count from THIS home
@@ -243,12 +272,16 @@ def main(argv=None):                                             # NEW: argv for
                 elif t_capture - last_texture_warn > 2.0:
                     print(f"Not enough ground texture for home ({n} corners) - retrying")
                     last_texture_warn = t_capture
+            if old_ref is not None and home_pending:             # NEW: new home failed (poor texture):
+                tracker.__dict__.update(old_ref)                 # keep tracking the OLD home meanwhile
             if not home_saved:
                 continue
 
             # ---------- 3. Measure + judge ----------
-            att_real = link.attitude_at(t_frame)                 # NEW: t_frame, and None = no IMU data
-            att = att_real or (0.0, 0.0, 0.0)
+            att_real = attitude_near(atts, t_frame)    # NEW: thread-safe; None = missing/stale IMU
+            att = att_real or (0.0, 0.0, 0.0)                    # NEW
+            if home_att is None and att_real:                    # NEW: home saved before IMU data arrived:
+                home_att = att_real                              # use the first attitude (approximation)
             res = tracker.track(gray, t_capture, attitude=att)
             prof.lap("track")                                    # NEW
             rep = health.check(gray, res)
@@ -261,15 +294,21 @@ def main(argv=None):                                             # NEW: argv for
                 quality = -1                                     # can't turn pixels into metres
 
             # NEW: vision must agree with the IMU about how much we turned since home
-            imu_err = 0.0
+            imu_err, disagree = 0.0, False
             if config.USE_IMU_CHECK and res.ok and att_real:
                 agree, imu_err = imu_check.check(res.rotation_deg, att_real[2])
                 if not agree:
-                    quality = -1
+                    quality, disagree = -1, True
                     rep.reasons.append(f"vision/IMU disagree ({imu_err:+.1f} deg)")
+            imu_bad_streak = imu_bad_streak + 1 if disagree else 0
+            if att_real is None and quality > 0:                 # NEW: no IMU -> heading unknown: N/E
+                quality = -1                                     # would be rotated by a fake yaw 0
+                rep.reasons.append("no IMU attitude (missing or stale)")
 
-            # NEW: lost and failing -> try to re-find home (tracker.relock)
-            if config.USE_RECOVERY and recovery.update(gray, rep.status == "LOST" and health.bad_count > 0):
+            # NEW: lost and failing (or locked onto something the IMU disagrees with) -> re-find home
+            failing = ((rep.status == "LOST" and health.bad_count > 0)
+                       or imu_bad_streak >= config.IMU_DISAGREE_RECOVER_FRAMES)
+            if config.USE_RECOVERY and recovery.update(gray, failing):
                 print(f"Re-found HOME (re-lock #{recovery.relocks})")
 
             # NEW: remove the fake shift caused by roll/pitch
@@ -289,10 +328,10 @@ def main(argv=None):                                             # NEW: argv for
                 prev_ne = (north, east, t_capture)
 
             # NEW: climbed/descended ~15% -> new reference picture here, position stays continuous
-            if config.USE_REHOME and quality > 0 and rehome.due(rep.status, res):
+            if config.USE_REHOME and quality > 0 and att_real and rehome.due(rep.status, res):
                 if rehome.rehome(tracker, health, gray, t_capture, north, east, MIN_HOME_CORNERS):
-                    home_att = att_real or home_att
-                    imu_check.set_home(att_real[2] if att_real else None)   # rotation restarts at 0 here
+                    home_att = att_real
+                    imu_check.set_home(att_real[2])              # rotation restarts at 0 here
                     recovery.set_home(gray)
                     print(f"Re-homed at {height:.1f} m (#{rehome.count}), offset N={north:+.2f} E={east:+.2f}")
 
@@ -313,14 +352,11 @@ def main(argv=None):                                             # NEW: argv for
                 link.set_source(want_source)                     # retried until the autopilot says OK
                 last_source_try = now
 
-            # NEW: vision lost for too long while the autopilot relies on it -> safe mode
-            action = failsafe.update(rep.status == "LOST" and link.acked_source == SRC_VISION, now)
-            if action:
-                print(f"FAILSAFE: vision lost for {config.FAILSAFE_AFTER_S:.0f} s -> switching to {action}")
-                with link.send_lock:
-                    link.conn.set_mode(action)
+            # NEW: no VALID position for too long while the autopilot relies on vision -> safe mode
+            # (covers LOST, but also IMU disagreement / no height while health still says OK)
+            failsafe.step(quality <= 0 and link.acked_source == SRC_VISION, now, link)
 
-            loop_ms = prof.end_frame()                           # NEW
+            prof.end_frame()                                     # NEW
             ms = prof.current
             log.writerow([f"{t_capture:.3f}", rep.status, quality,
                           f"{north:.3f}", f"{east:.3f}", height,
@@ -332,7 +368,7 @@ def main(argv=None):                                             # NEW: argv for
                           *(f"{ms.get(s, 0.0):.2f}" for s in ("grab", "track", "health", "fusion", "send", "total")),
                           rehome.count])
             if is_camera:                                        # NEW: fell behind -> drop stale frames
-                for _ in range(budget.frames_to_drop(loop_ms / 1000)):
+                for _ in range(budget.frames_to_drop(time.time() - t_capture, t_capture - t_read)):
                     cap.grab()
 
             if args.show:
@@ -360,7 +396,7 @@ def main(argv=None):                                             # NEW: argv for
         log_file.close()
         if recorder:                                             # NEW
             recorder.close()
-            print(f"Recording saved in {args.record} ({recorder.n} frames)")
+            print(f"Recording saved in {rec_dir} ({recorder.n} frames)")
         cv2.destroyAllWindows()
         if prof.frames:                                          # NEW: compute summary for the slide
             print(f"\n{prof.table()}\nRe-locks: {recovery.relocks}, stale frames dropped: {budget.dropped}")

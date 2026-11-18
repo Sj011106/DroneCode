@@ -38,7 +38,7 @@ from fusion.tilt import cancel_tilt
 from health.health import HealthChecker
 from recovery.recovery import Recovery
 from tools.degrade_video import make_ground, render
-from vision.enhance import enhance
+from vision.enhance import downscale, enhance, scale_camera_matrix
 from vision.rolling_shutter import RollingShutterTracker
 from vision.tracker import load_calibration
 
@@ -49,7 +49,7 @@ def synthetic_frames(n, K, size=(640, 480)):
     pose = lambda t: (0.05 * t, 0.0, 4.16, math.radians(2) * math.sin(25 * t),
                       math.radians(2) * math.sin(19 * t), 0.1 * t)
     for i in range(n):
-        yield i / 30, cv2.cvtColor(render(ground, K, size, pose, i / 30, readout_s=0.025,
+        yield i / 30, cv2.cvtColor(render(ground, K, size, pose, i / 30, readout_s=0.015,
                                           noise=2, rng=rng), cv2.COLOR_GRAY2BGR)
 
 
@@ -79,16 +79,19 @@ def main():
     t_end = frames[-1][0] + 1
     history = [(t, 0.01 * math.sin(25 * t), 0.01 * math.sin(19 * t), 0.0)
                for t in np.arange(-1, t_end, 0.02)]             # 50 Hz attitude stream
-    tracker = RollingShutterTracker(K, None if not args.video else dist, attitude_history=history)
+    full_w = frames[0][1].shape[1]
+    small_w = downscale(cv2.cvtColor(frames[0][1], cv2.COLOR_BGR2GRAY)).shape[1]   # as in flight
+    tracker = RollingShutterTracker(scale_camera_matrix(K, small_w / full_w),
+                                    None if not args.video else dist, attitude_history=history)
     health, imu = HealthChecker(), ImuCheck()
     imu.set_home(0.0)
     prof = Profiler(budget_ms=1000 / 30)
 
-    first = enhance(cv2.cvtColor(frames[0][1], cv2.COLOR_BGR2GRAY))
+    first = enhance(downscale(cv2.cvtColor(frames[0][1], cv2.COLOR_BGR2GRAY)))
     tracker.set_reference(first, frames[0][0])
     for t, frame in frames[1:]:
         prof.start_frame()
-        gray = enhance(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        gray = enhance(downscale(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
         prof.lap("grab")                   # includes the contrast boost (CLAHE)
         res = tracker.track(gray, t)
         prof.lap("track")
@@ -104,14 +107,15 @@ def main():
     rec.set_home(first)
     t0 = time.perf_counter()
     for _, frame in frames[1:11]:
-        rec.find_home(enhance(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
+        rec.find_home(enhance(downscale(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))))
     orb_ms = (time.perf_counter() - t0) * 100            # mean of 10, in ms
 
     h, w = first.shape
     report = (f"# Pipeline benchmark\n\n"
               f"Machine: {platform.machine()} | {platform.processor() or platform.system()} | "
               f"{os.cpu_count()} cores | Python {platform.python_version()} | OpenCV {cv2.__version__}\n"
-              f"Input: {args.video or 'simulated rolling-shutter video'} | {w}x{h} | {len(frames) - 1} frames\n"
+              f"Input: {args.video or 'simulated rolling-shutter video'} | {full_w} px wide, processed at "
+              f"{w}x{h} (config.PROCESS_WIDTH) | {len(frames) - 1} frames\n"
               f"Note: frames are processed back to back, so FPS here = the maximum this computer can do.\n\n"
               f"{prof.table()}\n\n"
               f"Recovery search (ORB, runs only while LOST): {orb_ms:.1f} ms per attempt\n")

@@ -32,9 +32,19 @@ REHOME_SCALE_MAX = 1.18      # ground looks 18% bigger (descending) -> new refer
 
 # ---------------- Rolling shutter timing ----------------
 # Used ONLY if timing.npz is missing. calibration/calibrate_timing.py measures the real ones.
-READOUT_S = 0.025            # top row -> bottom row read time. Typical for 30 fps CMOS FPV cams.
+READOUT_S = 0.015            # top row -> bottom row read time. Justice D runs at 60 fps, so the
+                             # readout must be < 1/60 s = 16.7 ms. Measure the real one!
 CAM_IMU_OFFSET_S = 0.0       # middle row capture time minus our timestamp (negative = earlier)
 TIMING_FILE = "timing.npz"
+CALIB_FILE = "calib.npz"     # lens calibration (vision_hold loads this one; tests point it elsewhere)
+
+# ---------------- Camera (Justice D datasheet + APB manual) ----------------
+# 1280 x 720 @ 60 fps, HFOV 114 deg / VFOV 86 deg, MIPI CSI-1 = /dev/video2 (CSI-2 = /dev/video3),
+# no exposure/gain control. Use --camera 2 (or --camera /dev/video2: both are treated as a live camera).
+PROCESS_WIDTH = 640          # downscale every frame to this width before tracking (None = full
+                             # resolution). The camera matrix K is scaled to match, so metres are
+                             # unchanged; 1280 -> 640 is ~4x less work on the APB's Cortex-A53s.
+ATTITUDE_MAX_AGE_S = 0.1     # an attitude sample further than this from the frame time = no IMU data
 
 # ---------------- IMU cross-check ----------------
 IMU_CHECK_MAX_DEG = 5.0      # vision rotation vs IMU yaw change may differ by at most this
@@ -50,9 +60,23 @@ RECOVERY_MIN_INLIERS = 25    # matches that must agree before we trust a re-lock
 RECOVERY_ORB_FEATURES = 1000
 
 # ---------------- Failsafe ----------------
-FAILSAFE_AFTER_S = 3.0       # vision LOST this long (while flying on vision) -> act
+FAILSAFE_AFTER_S = 3.0       # no VALID position sent for this long while the autopilot flies on
+                             # vision (LOST, IMU disagreement, no height, camera dead) -> act
 FAILSAFE_ACTION = "LAND"     # "LAND", "ALT_HOLD" or "NONE". LAND matches ArduPilot's own
                              # EKF failsafe default (FS_EKF_ACTION = 1).
+FAILSAFE_MODE_RETRIES = 5    # resend the mode change (1 per second) until the autopilot reports it
+IMU_DISAGREE_RECOVER_FRAMES = 3   # this many IMU-disagreement frames in a row -> try recovery (relock)
+
+# ---------------- Autopilot ----------------
+MIN_ARDUPILOT_VERSION = (4, 5, 0)   # TEAM DECISION: ArduPilot only, >= 4.5. Before 4.5 the autopilot
+                             # ignores ODOMETRY's quality field (VISO_QUAL_MIN) and would fuse our
+                             # "no data" packets as real positions. link/check_link.py enforces this.
+
+# ---------------- Recording (--record) ----------------
+# The APB has only 4 GB eMMC: record the downscaled grey frames, and to /sdcard when present.
+RECORD_CODEC = "FFV1"        # lossless (replay sees identical pixels), ~250 MB/min worst case at
+                             # 640x360 30 fps; "MJPG" ~90 MB/min but lossy (measured)
+RECORD_MIN_FREE_MB = 300     # stop recording (not flying) when the disk has less free space than this
 
 # ---------------- Confidence we send to ArduPilot ----------------
 # Position error in PIXELS at the best / worst quality. link/drone_link.py multiplies it by
@@ -64,4 +88,5 @@ ODOM_PX_NOISE_BEST = 0.5     # quality 100
 ODOM_PX_NOISE_WORST = 3.0    # quality 1
 
 # ---------------- Compute budget ----------------
-TARGET_FPS = 30              # camera frame rate; the time budget per frame is 1 / TARGET_FPS
+TARGET_FPS = 30              # processing rate we aim for; budget per frame = 1 / TARGET_FPS.
+                             # (The camera runs at 60 fps; stale frames are dropped by frame age.)

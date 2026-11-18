@@ -21,10 +21,10 @@ from health.health import REGAIN_AFTER, HealthChecker
 from tools.degrade_video import make_pyramid, make_terrain, render_mip
 from vision.rehome import Rehome
 from vision.rolling_shutter import RollingShutterTracker
-from vision.tracker import load_calibration, to_north_east
+from vision.tracker import to_north_east
 
 W, H, FPS = 640, 480, 30
-K, _ = load_calibration()
+from tests.common import K                  # fixed test camera (not the repo's calib.npz)
 M_PER_TEXEL = 0.02
 pyr = make_pyramid(make_terrain(4096, M_PER_TEXEL, seed=5))      # 82 m square of ground
 rng = np.random.default_rng(5)

@@ -62,6 +62,29 @@ status = {r[0]: r[4] for r in rows}
 print(f"  write    : {status}")
 assert status["VISO_TYPE"] == "CHANGED" and fake.store["VISO_TYPE"] == 1.0
 
+# newer firmware renamed ANGLE_MAX (centidegrees) -> ATC_ANGLE_MAX (degrees)
+fake = FakeAutopilot({"ATC_ANGLE_MAX": 30.0, "RC7_OPTION": 31.0})       # 31 = motor emergency stop
+rows = apply(fake, [("ANGLE_MAX", 2000.0), ("RC7_OPTION", 0.0)])
+status = {r[0]: r[4] for r in rows}
+print(f"  renamed  : {status}  ATC_ANGLE_MAX now {fake.store['ATC_ANGLE_MAX']:g} deg (want 20)")
+assert status == {"ATC_ANGLE_MAX": "CHANGED", "RC7_OPTION": "SKIPPED"} and fake.store["ATC_ANGLE_MAX"] == 20.0
+assert fake.store["RC7_OPTION"] == 31.0, "must not overwrite a channel that already has a function"
+rows = apply(fake, [("RC7_OPTION", 0.0)], force=True)
+print(f"  --force  : RC7_OPTION {rows[0][4]} -> {fake.store['RC7_OPTION']:g}")
+assert rows[0][4] == "CHANGED" and fake.store["RC7_OPTION"] == 0.0
+
+# firmware check reads HEARTBEAT + AUTOPILOT_VERSION (4.4.4 must be below the 4.5 minimum)
+from types import SimpleNamespace
+import config
+from ardupilot.load_params import firmware
+fake.messages = {"HEARTBEAT": SimpleNamespace(autopilot=3),             # 3 = ArduPilot
+                 "AUTOPILOT_VERSION": SimpleNamespace(flight_sw_version=(4 << 24) | (4 << 16) | (4 << 8))}
+fake.command = lambda *a: None
+name, version = firmware(fake)
+print(f"  firmware : {name} {version} -> below minimum {config.MIN_ARDUPILOT_VERSION}: "
+      f"{version < config.MIN_ARDUPILOT_VERSION}")
+assert "ARDUPILOT" in name and version == (4, 4, 4) and version < config.MIN_ARDUPILOT_VERSION
+
 # ---- 3. The confidence we send to ArduPilot scales with height ----
 print("\nTest 3: position noise sent in ODOMETRY vs height (quality 50, focal 416 px)")
 import math

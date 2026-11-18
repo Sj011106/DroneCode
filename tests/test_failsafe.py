@@ -46,4 +46,31 @@ assert len(fired) == 2
 none = Failsafe(after_s=3.0, action="NONE")
 assert all(none.update(True, x * dt) is None for x in range(300))
 print("action NONE never fires: OK")
+
+# step(): the mode change must STICK. The first 2 commands get lost; the autopilot only
+# switches on the 3rd. Then it must stop resending. A deaf autopilot: give up after N tries.
+import threading
+from types import SimpleNamespace
+
+import config
+
+
+class Conn:
+    def __init__(self, obey_on):
+        self.flightmode, self.sent, self.obey_on = "LOITER", [], obey_on
+
+    def set_mode(self, mode):
+        self.sent.append(mode)
+        if len(self.sent) == self.obey_on:
+            self.flightmode = mode
+
+
+for obey_on, expect_sent in ((3, 3), (99, config.FAILSAFE_MODE_RETRIES)):
+    link = SimpleNamespace(conn=Conn(obey_on), send_lock=threading.Lock())
+    fs = Failsafe(after_s=3.0, action="LAND")
+    for i in range(int(15 / dt)):
+        fs.step(True, i * dt, link)
+    print(f"autopilot obeys on try {obey_on}: sent {len(link.conn.sent)} x LAND, now in {link.conn.flightmode}")
+    assert len(link.conn.sent) == expect_sent
+assert link.conn.flightmode == "LOITER" and fs.pending is None      # gave up, told the pilot
 print("\nALL FAILSAFE TESTS PASSED")

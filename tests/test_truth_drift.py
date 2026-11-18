@@ -50,4 +50,44 @@ assert abs(by_band["20-40 m"]["drift_rms"] - math.sqrt(np.mean(exp ** 2))) < 0.0
 assert abs(by_band["20-40 m"]["vision_err_rms"] - 0.2) < 0.01
 assert abs(by_band["20-40 m"]["ekf_err_rms"] - 0.1) < 0.01
 assert by_band["5-10 m"]["vision_err_rms"] < 0.01 and by_band["5-10 m"]["ekf_err_rms"] < 0.01
+
+# ---- 3. the .bin reader: field names, filters, hold start, vision resets ----
+from tools.truth_drift import load_bin
+
+
+class Msg:
+    """Stands in for a pymavlink DFReader message."""
+    def __init__(self, kind, **fields):
+        self.kind, self.fields = kind, fields
+
+    def get_type(self):
+        return self.kind
+
+    def to_dict(self):
+        return self.fields
+
+
+LAT0, LON0 = 45.0, -75.0
+east_at = lambda t: 0.01 * t                                    # truth: 1 cm/s eastwards
+deg_e = 1 / (math.radians(1) * 6378137.0 * math.cos(math.radians(LAT0)))   # degrees per metre east
+msgs = [Msg("MODE", TimeUS=5e6, Mode=2, ModeNum=2), Msg("MODE", TimeUS=20e6, Mode=5, ModeNum=5)]
+for t in np.arange(0, 60, 0.2):
+    msgs.append(Msg("GPS", TimeUS=t * 1e6, I=0, Status=3, Lat=LAT0, Lng=LON0 + east_at(t) * deg_e))
+    msgs.append(Msg("GPS", TimeUS=t * 1e6, I=1, Status=3, Lat=LAT0 + 0.001, Lng=LON0))   # 2nd receiver: ignore
+    msgs.append(Msg("BARO", TimeUS=t * 1e6, I=0, Alt=12.0))
+for t in np.arange(10, 60, 1 / 30):
+    rst = 1 if t < 40 else 2                                    # home re-saved at t = 40 s
+    origin = 10 if rst == 1 else 40
+    msgs.append(Msg("VISP", TimeUS=t * 1e6, PX=0.0, PY=east_at(t) - east_at(origin), Rst=rst, Ign=0))
+msgs.sort(key=lambda m: m.fields["TimeUS"])
+print("\nTest 3: reading a (pretend) ArduPilot log")
+tr = load_bin(None, messages=msgs)
+rows, _ = drift_report(tr["truth"], tr["alt"], tr.get("vision"), tr.get("ekf"), tr["hold_start"])
+print(f"  hold start {tr['hold_start']:.1f} s (pilot switched to LOITER at 20 s), "
+      f"GPS samples {len(tr['truth'][0])} (receiver 1 ignored), vision error {rows[0]['vision_err_rms'] * 100:.2f} cm "
+      f"across a vision reset, drift {rows[0]['drift_max']:.2f} m (expect 0.40)")
+assert tr["hold_start"] == 20.0
+assert len(tr["truth"][0]) == 300
+assert rows[0]["vision_err_rms"] < 0.005, "vision reset (Rst) must not look like an error"
+assert abs(rows[0]["drift_max"] - 0.398) < 0.01
 print("\nALL TRUTH-DRIFT TESTS PASSED")

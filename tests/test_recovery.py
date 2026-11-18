@@ -19,12 +19,12 @@ import numpy as np
 from health.health import HealthChecker
 from recovery.recovery import Recovery
 from tools.degrade_video import make_ground, render
-from vision.tracker import GroundTracker, load_calibration, to_north_east
+from vision.tracker import GroundTracker, to_north_east
 
 W, H = 640, 480
 HEIGHT = 4.16
 FPS = 30
-K, _ = load_calibration()
+from tests.common import K                  # fixed test camera (not the repo's calib.npz)
 ground = make_ground(3000)
 rng = np.random.default_rng(3)
 

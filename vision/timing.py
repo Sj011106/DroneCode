@@ -50,13 +50,14 @@ class CameraTiming:
                 f"offset={self.offset_s * 1000:+.1f} ms, from {self.source})")
 
 
-def load_timing(path=config.TIMING_FILE):
+def load_timing(path=None):
     """timing.npz if calibrated, otherwise the defaults in config.py."""
+    path = config.TIMING_FILE if path is None else path
     if os.path.exists(path):
         d = np.load(path)
         return CameraTiming(d["readout_s"], d["offset_s"], source=path)
     return CameraTiming(config.READOUT_S, config.CAM_IMU_OFFSET_S)
 
 
-def save_timing(readout_s, offset_s, path=config.TIMING_FILE):
-    np.savez(path, readout_s=readout_s, offset_s=offset_s)
+def save_timing(readout_s, offset_s, path=None):
+    np.savez(config.TIMING_FILE if path is None else path, readout_s=readout_s, offset_s=offset_s)

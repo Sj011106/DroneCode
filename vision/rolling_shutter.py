@@ -68,6 +68,19 @@ def attitude_at(history, t):
     return ang[i - 1] + (ang[i] - ang[i - 1]) * w[:, None]
 
 
+def attitude_near(history, t, max_age=None):
+    """Nearest (roll, pitch, yaw) sample to time t, or None if no sample is within max_age
+    seconds (IMU data missing or stale). Thread-safe: takes a snapshot first, because the
+    MAVLink reader thread appends to the live deque (iterating it directly can raise
+    "deque mutated during iteration" and crash the main loop)."""
+    max_age = config.ATTITUDE_MAX_AGE_S if max_age is None else max_age
+    snap = list(history)                              # C-level copy: atomic under the GIL
+    if not snap:
+        return None
+    s = min(snap, key=lambda a: abs(a[0] - t))
+    return tuple(s[1:4]) if abs(s[0] - t) <= max_age else None
+
+
 def correct_points(pts_raw, pts_und, t_capture, rows, history, timing, K):
     """Move undistorted points to where they'd be if the whole frame were captured at
     its middle-row time. pts_raw gives each point's ROW (raw image); pts_und are the

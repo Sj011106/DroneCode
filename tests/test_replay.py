@@ -7,8 +7,10 @@
 #   vision_hold.py: twice with the same settings (must give identical results), then
 #   with the tilt fix OFF and with the rolling-shutter fix OFF. This is how the
 #   "with vs without" slides are made from ONE real flight.
-#   Test 2: a live run (pretend autopilot + video) is recorded with --record and replayed:
-#   the replay must reproduce the live positions exactly.
+#   Test 2: a live run (pretend autopilot + video, rocking attitude, rolling-shutter fix ON)
+#   is recorded with --record and replayed: the replay must reproduce the live positions
+#   exactly (each frame gets exactly the IMU samples it had live).
+#   Test 3: --set reaches settings that our classes read when they're created.
 #
 # Run (from the repo root):  python -m tests.test_replay      (~1 min)
 # REFERENCES: see tools/replay.py.
@@ -28,11 +30,11 @@ import numpy as np
 import config
 import vision_hold
 from tools.degrade_video import make_ground, render
+from tests.common import K, use_test_camera
 from tools.replay import Recorder
-from vision.tracker import load_calibration
 
 W, H, FPS, HEIGHT, T0 = 640, 480, 30, 6.0, 1000.0
-K, _ = load_calibration()
+use_test_camera()                                    # fixed lens + default timing, not the repo's files
 ground = make_ground(3000)
 rng = np.random.default_rng(7)
 tmp = tempfile.mkdtemp(prefix="dronecode_replay_")
@@ -81,7 +83,7 @@ def positions(rows):
 print("Test 1: record a simulated flight, replay it with different settings")
 rec_dir = os.path.join(tmp, "rec_sim")
 rec = Recorder(rec_dir)
-imu = [(t, *pose(t)[3:]) for t in np.arange(T0 - 0.5, T0 + 5.0, 0.02)]    # 50 Hz attitude stream
+imu = [(t, *pose(t)[3:]) for t in np.arange(T0 - 0.5, T0 + 8.0, 0.02)]    # 50 Hz attitude stream
 for i in range(int(4 * FPS)):
     t = T0 + i / FPS
     img = render(ground, K, (W, H), pose, t, readout_s=config.READOUT_S, noise=2, rng=rng)
@@ -114,8 +116,13 @@ for i in range(int(3 * FPS)):
 out.release()
 
 
+def rocking(t):
+    """Pretend IMU: roll/pitch rocking +-2 deg at 3/2 Hz, heading fixed."""
+    return (math.radians(2) * math.sin(6 * math.pi * t), math.radians(2) * math.sin(4 * math.pi * t), 0.0)
+
+
 class FakeLink:
-    """Pretend autopilot: attitude at 50 Hz in a thread, fixed height."""
+    """Pretend autopilot: rocking attitude at 50 Hz in a thread, fixed height."""
     def __init__(self, connection):
         self.conn = type("C", (), {"flightmode": "LOITER", "address": "fake", "set_mode": lambda s, m: None})()
         self.send_lock, self.attitudes = threading.Lock(), deque(maxlen=200)
@@ -124,7 +131,8 @@ class FakeLink:
     def start(self):
         def feed():
             while self.running:
-                self.attitudes.append((time.time(), 0.0, 0.0, 0.0))
+                now = time.time()
+                self.attitudes.append((now, *rocking(now)))
                 time.sleep(0.02)
         threading.Thread(target=feed, daemon=True).start()
         time.sleep(0.1)
@@ -145,11 +153,51 @@ vision_hold.DroneLink = FakeLink
 live_dir = os.path.join(tmp, "rec_live")
 live_log = os.path.join(tmp, "live.csv")
 vision_hold.main(["--camera", video, "--trigger", "start", "--record", live_dir, "--log", live_log,
-                  "--no-gps-fallback", "--set", "USE_ROLLING_SHUTTER=False"])
+                  "--no-gps-fallback"])                         # rolling-shutter fix ON
 vision_hold.DroneLink = real_link
 live = read_log(live_log)
-again = replay(live_dir, "live_replay", "USE_ROLLING_SHUTTER=False")
+again = replay(live_dir, "live_replay")
 same = sum(a == b for a, b in zip(positions(live), positions(again)))
-print(f"\n  live frames {len(live)}, replayed frames {len(again)}, identical positions {same}/{len(live)}")
+trusted = sum(r["status"] == "OK" and r["north_m"] != "nan" for r in live)
+print(f"\n  live frames {len(live)}, replayed frames {len(again)}, identical positions {same}/{len(live)} "
+      f"({trusted} trusted, attitude rocking, rolling-shutter fix on)")
 assert len(live) == len(again) and same == len(live), "replay must reproduce the live run"
+assert trusted > len(live) // 2, "the live run must actually produce positions (not a trivial all-nan match)"
+
+# ---------------- Test 3: --set reaches settings read at creation time ----------------
+print("\nTest 3: --set changes settings used when our objects are created")
+from fusion.height import HeightFilter
+from fusion.imu_check import ImuCheck
+from recovery.failsafe import Failsafe
+from recovery.recovery import Recovery
+config.IMU_CHECK_MAX_DEG, config.HEIGHT_MAX_RATE_MPS, config.RECOVERY_MIN_INLIERS = 20.0, 99.0, 5
+config.FAILSAFE_AFTER_S = 7.0
+got = (ImuCheck().max_deg, HeightFilter().max_rate, Recovery(None).min_inliers, Failsafe().after_s)
+print(f"  ImuCheck {got[0]}, HeightFilter {got[1]}, Recovery {got[2]}, Failsafe {got[3]} (should be 20, 99, 5, 7)")
+assert got == (20.0, 99.0, 5, 7.0)
+for k, v in DEFAULTS.items():
+    setattr(config, k, v)
+
+# ---------------- Test 4: failsafe when health says OK but no valid position is sent -------------
+# (review finding: the height disappears -> quality -1 while health stays "OK"; the old
+#  failsafe only watched for LOST and never fired)
+print("\nTest 4: height lost after 2 s while flying on vision (health still OK) -> failsafe")
+import contextlib
+import io
+rec_dir = os.path.join(tmp, "rec_noheight")
+rec = Recorder(rec_dir)
+for i in range(int(7 * FPS)):
+    t = T0 + i / FPS
+    img = render(ground, K, (W, H), pose, t, readout_s=config.READOUT_S, noise=2, rng=rng)
+    rec.add(img, t, i == 0, HEIGHT if i < 2 * FPS else None, [s for s in imu if s[0] <= t])
+rec.close()
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    rows = replay(rec_dir, "noheight")
+text = out.getvalue()
+ok_no_pos = sum(r["status"] == "OK" and r["north_m"] == "nan" for r in rows)
+fired = [l for l in text.splitlines() if l.startswith("FAILSAFE")]
+print(f"  frames with status OK but no position: {ok_no_pos}; failsafe messages: {fired[:2]}")
+assert ok_no_pos > 2 * FPS, "health should still say OK while the height is missing"
+assert any("-> LAND" in l for l in fired), "failsafe must fire when no valid position is sent"
 print("\nALL REPLAY TESTS PASSED")

@@ -18,11 +18,11 @@ import numpy as np
 
 from fusion.tilt import cancel_tilt, nadir_offset_px
 from tools.degrade_video import make_ground, render
-from vision.tracker import GroundTracker, load_calibration, to_north_east
+from vision.tracker import GroundTracker, to_north_east
 
 W, H = 640, 480
 HEIGHT = 4.16                 # metres -> about 1 cm per pixel with this calibration
-K, _ = load_calibration()
+from tests.common import K                  # fixed test camera (not the repo's calib.npz)
 F = (K[0, 0] + K[1, 1]) / 2
 ground = make_ground()
 rng = np.random.default_rng(1)

@@ -12,12 +12,18 @@
 #   Everything comes from ONE clock (the flight controller's), so no time syncing.
 #
 # HOW IT WORKS (technical)
-#   - Reads GPS (Lat, Lng; Status >= 3 = 3D fix only), XKF1 core 0 (PN, PE, PD),
-#     VISP (PX, PY: the vision positions ArduPilot received; rows with Ign = 1, i.e.
-#     below VISO_QUAL_MIN, are skipped) and BARO (Alt) via pymavlink's DFReader.
-#     Missing message types are reported and skipped, never fatal.
+#   - Reads GPS (Lat, Lng; first receiver I = 0, Status >= 3 = 3D fix only), XKF1 core 0
+#     (PN, PE, PD), VISP (PX, PY: the vision positions ArduPilot received; rows with Ign = 1,
+#     i.e. below VISO_QUAL_MIN, are skipped), BARO (Alt, I = 0) and MODE via pymavlink's
+#     DFReader. Missing message types are reported and skipped, never fatal.
+#   - VISP TimeUS is when ArduPilot RECEIVED the position (CTimeMS = corrected capture
+#     time): so "vision error" includes ~VISO_DELAY_MS x speed of lag. At a hover that's small.
+#   - VISP Rst (reset counter) changes when vision_hold saves a new home: positions restart
+#     at 0. Each Rst segment is aligned to the truth at its first sample, so a re-trigger
+#     doesn't look like a huge vision error.
 #   - GPS lat/lon -> metres North/East (local flat-earth approximation, fine over < 1 km).
-#   - Hold point: the moment vision positions start (first VISP), or --start seconds.
+#   - Hold point: the first switch to LOITER/POSHOLD after vision starts (the pilot engages
+#     the hold), else the first VISP, or --start seconds.
 #     All three tracks are compared as DISPLACEMENTS from that moment, so their
 #     different origins don't matter.
 #   - Vision/EKF are interpolated onto GPS times. GPS itself has ~0.1-0.2 s lag and
@@ -44,6 +50,7 @@ import numpy as np
 
 EARTH_R = 6378137.0
 BANDS = ((0, 5), (5, 10), (10, 20), (20, 40), (40, 80), (80, 1000))
+HOLD_MODE_NUMS = {5, 16}                          # ArduCopter LOITER = 5, POSHOLD = 16
 
 
 def latlon_to_ne(lat, lon, lat0, lon0):
@@ -88,26 +95,47 @@ def drift_report(truth, alt, vision=None, ekf=None, t0=None, t_end=None, bands=B
     return out, dict(t=tt, dist=dist, h=h, **errs)
 
 
-def load_bin(path):
-    """Read the tracks from an ArduPilot .bin log. Missing types -> None (reported)."""
+def _messages(path):
     from pymavlink import mavutil
     log = mavutil.mavlink_connection(path)
-    gps, ekf, vis, baro = [], [], [], []
     while True:
-        m = log.recv_match(type=["GPS", "XKF1", "VISP", "BARO"], blocking=False)
+        m = log.recv_match(type=["GPS", "XKF1", "VISP", "BARO", "MODE"], blocking=False)
         if m is None:
-            break
+            return
+        yield m
+
+
+def align_segments(t, n, e, rst, truth):
+    """Vision restarts at 0 whenever its reset counter (Rst) changes (a new home). Shift each
+    segment so its first sample equals the truth position at that moment."""
+    t, n, e, rst = (np.asarray(x, float) for x in (t, n, e, rst))
+    n, e = n.copy(), e.copy()
+    starts = np.r_[0, np.nonzero(np.diff(rst))[0] + 1]
+    ends = np.r_[starts[1:], len(t)]
+    for a, b in zip(starts, ends):
+        n[a:b] += np.interp(t[a], truth[0], truth[1]) - n[a]
+        e[a:b] += np.interp(t[a], truth[0], truth[2]) - e[a]
+    return t, n, e
+
+
+def load_bin(path, messages=None):
+    """Read the tracks from an ArduPilot .bin log (or any iterable of DF messages, for tests).
+    Missing types -> reported. Returns dict(truth, alt, [vision], [ekf], hold_start)."""
+    gps, ekf, vis, baro, modes = [], [], [], [], []
+    for m in (messages if messages is not None else _messages(path)):
         d, kind = m.to_dict(), m.get_type()
         t = d.get("TimeUS", 0) / 1e6
-        if kind == "GPS" and d.get("Status", 0) >= 3:
+        if kind == "GPS" and d.get("I", 0) == 0 and d.get("Status", 0) >= 3:
             gps.append((t, d["Lat"], d["Lng"]))
         elif kind == "XKF1" and d.get("C", 0) == 0:
             ekf.append((t, d["PN"], d["PE"], -d["PD"]))
         elif kind == "VISP" and not d.get("Ign", 0):
-            vis.append((t, d.get("PX", math.nan), d.get("PY", math.nan)))
+            vis.append((t, d.get("PX", math.nan), d.get("PY", math.nan), d.get("Rst", 0)))
         elif kind == "BARO" and d.get("I", 0) == 0:
             baro.append((t, d["Alt"]))
-    for name, rows in (("GPS (3D fix)", gps), ("XKF1", ekf), ("VISP", vis), ("BARO", baro)):
+        elif kind == "MODE":
+            modes.append((t, d.get("ModeNum", d.get("Mode"))))
+    for name, rows in (("GPS (3D fix)", gps), ("XKF1", ekf), ("VISP", vis), ("BARO", baro), ("MODE", modes)):
         print(f"  {name:13s}: {len(rows)} samples" + ("  <- missing" if not rows else ""))
     if not gps:
         raise SystemExit("No GPS with a 3D fix in this log: no truth to compare against.")
@@ -119,7 +147,7 @@ def load_bin(path):
         tracks["ekf"] = (a[:, 0], a[:, 1], a[:, 2])
     if vis:
         a = np.array(vis)
-        tracks["vision"] = (a[:, 0], a[:, 1], a[:, 2])
+        tracks["vision"] = align_segments(a[:, 0], a[:, 1], a[:, 2], a[:, 3], tracks["truth"])
     if baro:
         a = np.array(baro)
         tracks["alt"] = (a[:, 0], a[:, 1])
@@ -128,6 +156,9 @@ def load_bin(path):
         tracks["alt"] = (a[:, 0], a[:, 3])
     else:
         tracks["alt"] = (g[:, 0], np.zeros(len(g)))
+    first_vis = vis[0][0] if vis else None
+    engaged = [t for t, mode in modes if mode in HOLD_MODE_NUMS and (first_vis is None or t >= first_vis)]
+    tracks["hold_start"] = engaged[0] if engaged else first_vis
     return tracks
 
 
@@ -144,14 +175,17 @@ def print_report(rows):
 def main():
     ap = argparse.ArgumentParser(description="Real drift vs GPS truth, from an ArduPilot .bin log")
     ap.add_argument("log")
-    ap.add_argument("--start", type=float, help="hold start, seconds of log time (default: first VISP)")
+    ap.add_argument("--start", type=float,
+                    help="hold start, seconds of log time (default: first LOITER/POSHOLD after vision starts)")
     ap.add_argument("--end", type=float)
     ap.add_argument("--out", default="docs/plots")
     args = ap.parse_args()
 
     print(f"Reading {args.log}")
     tr = load_bin(args.log)
-    rows, series = drift_report(tr["truth"], tr["alt"], tr.get("vision"), tr.get("ekf"), args.start, args.end)
+    t0 = args.start if args.start is not None else tr["hold_start"]
+    print(f"Hold start: {t0:.1f} s" if t0 is not None else "Hold start: first GPS sample")
+    rows, series = drift_report(tr["truth"], tr["alt"], tr.get("vision"), tr.get("ekf"), t0, args.end)
     print_report(rows)
 
     import matplotlib

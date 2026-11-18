@@ -30,8 +30,15 @@ onboard computer, (3) how we detect and recover when vision fails.
 | ArduPilot settings | `ardupilot/vision_hold.param` + `load_params.py` | ✅ built; **never loaded on the real drone** |
 | Hardware | `docs/hardware.md`, `tools/discover_hardware.py` | ✅ fact sheet + discovery tool |
 
-**Who flies the drone?** ArduPilot (the flight controller). We **don't** write a flight controller. Our code
-measures "how far are we from home" and sends it to ArduPilot, which blends it with its own sensors and flies.
+**Who flies the drone?** ArduPilot (the flight controller) does the controlling; the **event pilots (Ted and
+Sujan)** do takeoff, landing and safety. Nobody on our team pilots. We **don't** write a flight controller. Our
+code measures "how far are we from home" and sends it to ArduPilot, which blends it with its own sensors and flies.
+
+> **Team decision: flight controller firmware = ArduPilot (≥ 4.5).** Not pursuing PX4, INAV or the optional
+> Betaflight bonus route.
+
+**Judging** (Stage 1 package): areas A–G scored on **evidence**, see [`docs/EVIDENCE.md`](EVIDENCE.md).
+**Hardware facts** (APB login, ports, camera): [`docs/hardware.md`](hardware.md).
 (README §8.)
 
 **The big unknowns** (answered by the organisers' spec 72 h before, or on hardware day): how the camera is
@@ -51,6 +58,8 @@ ArduPilot version, and the exact drift thresholds.
 - Every new feature gets an on/off switch in `config.py`, a test in `tests/`, and a plain-words header.
 - **Don't push half-finished work to `main`.** Work on a branch, open a pull request, merge when tests pass.
 - After the code freeze (task 2.4) only **settings** change, no new features.
+- **On the APB: `systemctl stop vision_hold` before running anything by hand** (if the boot service is enabled);
+  two programs on one camera or serial port break each other. Run everything as `venv/bin/python -m ...`.
 
 ---
 
@@ -177,6 +186,16 @@ ArduPilot version, and the exact drift thresholds.
   request on GitHub, merge only when tests pass and someone else has looked at it.
 - **Done when:** everyone has agreed in the chat.
 
+### 1.11 Confirm with organisers that an ArduPilot ≥ 4.5 build will be issued for the APB FC
+- [ ] **Owner:** ______
+- **Why:** Team decision: ArduPilot only. The aircraft's stock firmware appears to be Betaflight (aircraft manual
+  p.19), and before 4.5 ArduPilot ignores our "no data" flag (quality −1) and would fuse invalid positions.
+  Stage 1 says the event builds are announced in Stage 2: make sure ours is on the list.
+- **Steps:** email the organisers through the event thread: "Will an ArduPilot build, version 4.5 or newer, be
+  issued for the DTK APB flight controller (STM32H743)? Which exact version? Which serial port / baud connects it
+  to the i.MX (/dev/ttymxc2)?" Write the answer into `docs/hardware.md` §6.
+- **Done when:** confirmed in writing, version noted.
+
 ---
 
 ## Phase 2: When the technical spec arrives (72 h before)
@@ -190,7 +209,7 @@ ArduPilot version, and the exact drift thresholds.
   3. `ardupilot/vision_hold.param` section 7: serial port, GPS off (`GPS_TYPE` or `GPS1_TYPE` depending on
      the ArduPilot version), rangefinder if fitted. Remove the `#` only for lines the spec confirms.
      **A wrong serial-port setting can disable the RC receiver.**
-  4. `deploy/vision_hold.service`: the real `--connect` port and `--camera`.
+  4. `deploy/vision_hold.service`: check `--connect /dev/ttymxc2 --camera 2` and the `gpioset` lines against the spec.
   5. `python -m tests.test_params` must still pass.
 - **Done when:** all files updated, tests pass, pushed.
 - **Time:** 2–3 h.
@@ -205,7 +224,7 @@ ArduPilot version, and the exact drift thresholds.
 ### 2.3 Offline install packages (if the APB has no internet)
 - [ ] **Owner:** ______
 - **Why:** Discovering at the field that `pip install` can't download anything would stop us completely.
-- **Steps:** follow `docs/hardware.md` §5 with the APB's real Python version; put `wheels/` on a USB stick
+- **Steps:** follow `docs/hardware.md` §7 with the APB's real Python version; put `wheels/` on a USB stick
   and in a shared drive.
 - **Done when:** the install was tested on a Linux ARM machine, or confirmed unnecessary.
 
@@ -224,34 +243,40 @@ ArduPilot version, and the exact drift thresholds.
 ## Phase 3: Hardware day (first time with the real drone)
 
 > Order matters. Each step depends on the one before. **Props OFF** until step 3.6.
+> **Before every manual step: `systemctl stop vision_hold`** (only matters once the service is enabled).
 
 ### 3.1 Discover the hardware
 - [ ] **Owner:** ______
 - **Why:** Finds the camera, the flight controller's serial port, the CPU, OS and Python version automatically.
 - **Steps:**
-  1. Log in to the APB (method from the spec / organisers).
-  2. Copy the repo over (`git clone` or USB stick).
-  3. `python3 -m tools.discover_hardware`. **Save the whole output** into `docs/hardware.md`.
-  4. Open `logs/hw_camera_*.jpg`: the picture showing the floor is the Justice D. Note its number.
+  1. Laptop ↔ APB with the USB-C cable, then `ssh root@192.168.75.1` (APB manual p.10).
+  2. Copy the repo over: on the laptop `rsync -avP DroneCode root@192.168.75.1:~` (or `git clone`).
+  3. On the APB: `cd ~/DroneCode && sh deploy/install.sh` (needs Python; see 2.3 if there's no internet).
+  4. `venv/bin/python -m tools.discover_hardware --route-fc-uart`. **Save the whole output** into `docs/hardware.md`.
+     (`--route-fc-uart` runs the two `gpioset` commands that connect /dev/ttymxc2 to the flight controller.)
+  5. Open `logs/hw_camera_*.jpg`: the picture showing the floor is the Justice D (expected: camera **2**).
 - **Done when:** we know `--camera` and `--connect` values, and they're written in `docs/hardware.md`.
 
 ### 3.2 Install and benchmark ⚠ biggest risk
 - [ ] **Owner:** ______
 - **Why:** If the APB is too slow, positions arrive late and the hold oscillates.
 - **Steps:**
-  1. `sh deploy/install.sh` (or the offline steps from 2.3).
-  2. `python3 -m compute.benchmark` → read the "total" line.
+  1. (Installed in 3.1.)
+  2. `venv/bin/python -m compute.benchmark` → read the "total" line (frames are already shrunk to 640×360).
   3. **Under 33 ms:** great. **33–60 ms:** set `TARGET_FPS = 15` in `config.py` (ArduPilot copes with
-     15 Hz). **Over 60 ms:** reduce the picture size or the number of corners; ask Claude.
+     15 Hz). **Over 60 ms:** set `PROCESS_WIDTH = 480` in `config.py`, or fewer corners; ask Claude.
   4. Save the table (`logs/benchmark_*.md`) for the compute slide.
 - **Done when:** the pipeline runs within budget, and the table is saved.
 
 ### 3.3 Connect to the flight controller and load our settings
 - [ ] **Owner:** ______
 - **Steps:**
-  1. `python3 -m link.check_link --connect <port>` (first run: shows what's wrong).
-  2. `python3 -m ardupilot.load_params --connect <port>` → reboot the flight controller when it says so.
-  3. `python3 -m link.check_link --connect <port>` → must say **PASS**.
+  1. `venv/bin/python -m link.check_link --connect /dev/ttymxc2` (first run: shows what's wrong; it FAILS unless the
+     flight controller runs ArduPilot ≥ 4.5).
+  2. `venv/bin/python -m ardupilot.load_params --connect /dev/ttymxc2` (motors disarmed) → reboot the flight controller
+     when it says so. It never overwrites an RC channel that already has a function: if it says SKIPPED, ask the
+     event crew before using `--force`.
+  3. `venv/bin/python -m link.check_link --connect /dev/ttymxc2` → must say **PASS**.
 - **Done when:** PASS.
 
 ### 3.4 Calibrate the camera (props OFF)
@@ -259,9 +284,12 @@ ArduPilot version, and the exact drift thresholds.
 - **Why:** The lens calibration turns pixels into angles; the timing calibration feeds the rolling-shutter fix.
 - **Steps:**
   1. Print a checkerboard (8×5 inner corners; measure the square size and check `BOARD`/`SQUARE_M` in the script).
-  2. `python3 -m calibration.auto_calibrate <camera>` → move the board around → `calib.npz` saved.
-  3. `python3 -m calibration.calibrate_timing --camera <camera> --connect <port>` → twist and rock the drone
-     over a textured floor for 20 s → `timing.npz` saved. Write down the readout and offset it prints.
+  2. `venv/bin/python -m calibration.auto_calibrate 2` → move the board around → `calib.npz` saved. The repo's current
+     `calib.npz` is a webcam's: this replaces it. Note the reprojection error it prints: with a 114° lens, a high
+     error means a wide-angle lens model is needed (tell Saumya).
+  3. `venv/bin/python -m calibration.calibrate_timing --camera 2 --connect /dev/ttymxc2` → twist and rock the drone
+     over a textured floor for 20 s → `timing.npz` saved. Write down the readout (must be < 16.7 ms at 60 fps)
+     and the offset it prints.
   4. Set `VISO_DELAY_MS` in `ardupilot/vision_hold.param` ≈ −offset (ms) + benchmark total (ms) + 5, reload params.
 - **Done when:** `calib.npz` and `timing.npz` exist, both committed.
 
@@ -269,36 +297,47 @@ ArduPilot version, and the exact drift thresholds.
 - [ ] **Owner:** ______
 - **Why:** Catches sign or direction errors before they become a fly-away.
 - **Steps:**
-  1. `python3 vision_hold.py --connect <port> --camera <camera> --trigger start --fixed-height 1.0 --show`
-     (or watch the terminal/log if there's no screen).
+  1. `venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger start --fixed-height 1.0 --no-gps-fallback`
+     (watch the terminal; afterwards `venv/bin/python -m tools.analyze_log`).
   2. Hold the drone 1 m above a textured floor. Move it **forward** (nose direction): north/east must change
      in the direction the nose points. Move it **right**: it must change to the right. Rotate it: position stays ~0.
   3. Cover the camera → LOST. Uncover → OK again.
+  4. Check which way is "up" in the camera picture: our code assumes **top of image = nose**. If not, STOP.
 - **Done when:** all directions are correct. **If any direction is wrong, STOP and tell the team.**
 
 ### 3.6 First flight: 5–10 m, GPS on, recording on
-- [ ] **Owner:** pilot ______ + operator ______
-- **Why:** One recorded flight gives us the data to tune everything on the ground (replay).
+- [ ] **Owner:** operator ______ + crew liaison ______ (the event pilots fly)
+- **Why:** One recorded flight gives us real data: drift against GPS, and recordings to replay.
 - **Steps:**
-  1. Pilot takes off in ALT_HOLD to 5–10 m over good texture.
-  2. Operator starts `vision_hold.py` (with recording, see the README after task 1.1). Pilot flips channel 7
-     → home saved → wait for OK.
-  3. Pilot switches to LOITER. Hold 60 s. GPS stays on in practice so we have the truth to compare against.
-  4. Land. Copy `logs/` and the ArduPilot log (`.bin`) to the laptop.
-  5. `python -m tools.analyze_log` + the ground-truth tool (task 1.1) → what's our real drift?
+  1. Book the slot with the event crew; agree the plan: ALT_HOLD takeoff to 5–10 m over good texture, channel 7,
+     then LOITER for 60 s. GPS stays on in practice so we have the truth to compare against.
+  2. Operator on the APB:
+     `venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger rc --record`
+     (practice: GPS fallback on is acceptable; in the trial always add `--no-gps-fallback`).
+  3. Pilot flips channel 7 → "HOME saved" → wait for status OK and source = vision → pilot switches to LOITER.
+  4. Land. Copy `logs/`, the recording (`/sdcard/rec_*` or `logs/rec_*`) and the ArduPilot log (`.bin`) to the laptop.
+  5. `python -m tools.analyze_log` and `python -m tools.truth_drift <log>.BIN` → our REAL drift vs GPS.
 - **Done when:** a flight with a recording and its drift numbers.
 
-### 3.7 Tune on the ground with replay
+### 3.7 Tune: autopilot side in SITL / flight, vision side with replay
 - [ ] **Owner:** ______
-- **Steps:** replay the recording while changing `VISO_DELAY_MS` (in steps of ±20 ms) and
-  `ODOM_PX_NOISE_*`, using the symptom table in README §8. Pick the best values, fly again to confirm.
-- **Done when:** the hold looks steady in the plots.
+- **Why:** Replay has no autopilot inside, so it can't show how ArduPilot reacts. `VISO_DELAY_MS` and the noise
+  we send (`ODOM_PX_NOISE_*`) change how ArduPilot flies: tune them in the simulator (README §9) and confirm in
+  flight, using the symptom table in README §8 (slow swaying → delay; twitching → noise).
+- **Steps:**
+  1. Autopilot side: SITL with `tools/fake_vision.py` (step `VISO_DELAY_MS` ±20 ms), then one flight to confirm.
+  2. Vision side: replay the recording with `config.py` vision settings changed
+     (`python vision_hold.py --replay <rec> --set REHOME_SCALE_MIN=0.8`, `--set CLAHE_CLIP=3.0`, ...) and compare
+     `analyze_log` output.
+- **Done when:** the hold looks steady in flight, and the chosen values are committed.
 
 ### 3.8 The climb ladder: find our ceiling
-- [ ] **Owner:** pilot + operator
+- [ ] **Owner:** operator + crew liaison (the event pilots fly)
 - **Why:** We must arrive at the trial knowing our maximum safe altitude, not guessing it.
-- **Steps:** 10 m → 20 m → 40 m → 60 m → higher, each a 60 s hold, `analyze_log` after each.
-  Write each result in the table below. **Stop at the first height that fails the official thresholds.**
+- **Steps:** 10 m → 20 m → 40 m → 60 m → higher, each a 60 s hold with `--record`. After each:
+  `python -m tools.truth_drift <log>.BIN` for the **real** drift (GPS as referee; `analyze_log` only shows what
+  vision believes) and `analyze_log` for % time OK. Write each result in the table below.
+  **Stop at the first height that fails the official thresholds.**
 
   | Height | Surface | % time OK | RMS drift | Max drift | PASS/FAIL | Notes |
   |---|---|---|---|---|---|---|
@@ -316,7 +355,7 @@ ArduPilot version, and the exact drift thresholds.
 - **Done when:** one plot or number per feature, pasted into the slides.
 
 ### 3.10 Real blackout test in flight
-- [ ] **Owner:** pilot + operator
+- [ ] **Owner:** operator + crew liaison (the event pilots fly; agree the test with them first)
 - **Steps:** at a safe height, cover the camera for 2 s, then (separately) 10 s. Confirm recovery after 2 s,
   and LAND after 3 s for the 10 s case (or the pilot takes over).
 - **Done when:** both seen and logged.
@@ -328,20 +367,29 @@ ArduPilot version, and the exact drift thresholds.
 ### 4.1 Roles (decide before the day)
 | Role | Person | Job |
 |---|---|---|
-| Pilot | ______ | Flies; always ready to take over; final say on safety |
+| Pilot | **Ted / Sujan (event crew)** | Fly takeoff, the hold setup, landing; final say on safety. Not our team |
+| Crew liaison | ______ | Agrees each test with the pilots beforehand (plan, altitude, abort calls) |
 | Operator | ______ | Laptop/SSH; starts the program; watches status |
 | Caller | ______ | Reads out loud: altitude, status (OK/LOST), time held |
 | Logger | ______ | Saves all logs after every flight; notes the time of anything odd |
 
 ### 4.2 Trial sequence (print this)
-1. `python3 -m link.check_link --connect <port>` → PASS.
-2. Start `vision_hold.py` (or the boot service is already running: `sudo systemctl status vision_hold`).
-3. Take off in **ALT_HOLD**, climb to the planned altitude **over the chosen spot**.
-4. Flip **channel 7** → "HOME saved" → wait for status **OK** and source = vision.
-5. Switch to **LOITER**. Hold. Caller reads status every 10 s.
+1. On the APB: `systemctl stop vision_hold` (if it's enabled), then
+   `venv/bin/python -m link.check_link --connect /dev/ttymxc2` → **PASS**.
+2. Start the program:
+   `venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger rc --no-gps-fallback --record`
+   (or, if the boot service is enabled for the trial: `systemctl start vision_hold`, then
+   `journalctl -u vision_hold -f` to watch it).
+3. Pilot takes off in **ALT_HOLD** and climbs to the planned altitude **over the chosen spot** (GPS may help during
+   setup only).
+4. Pilot flips **channel 7** → "HOME saved" → wait for status **OK** and source = vision (vision is set up
+   *before* the hold, so engaging is smooth).
+5. Pilot engages the hold (**LOITER**, or the switch Stage 2 specifies). Caller reads status every 10 s.
 6. Abort criteria (pilot switches to ALT_HOLD/LAND immediately): status LOST for more than 2 s, drone visibly
-   drifting more than the threshold, any unexpected behaviour.
-7. After landing: copy logs, run `analyze_log`.
+   drifting more than the threshold, any unexpected behaviour. Our failsafe LANDs by itself after 3 s without a
+   valid position.
+7. After landing: copy logs + recording + `.bin`, run `analyze_log` and `truth_drift`; note results in
+   `docs/EVIDENCE.md` (area G).
 
 ### 4.3 Plan B
 - [ ] Decide **before** the day: if the target altitude fails, which lower altitude do we retry at?
@@ -369,6 +417,7 @@ ArduPilot version, and the exact drift thresholds.
 | Flight control + tuning symptoms | `README.md` §8 |
 | Simulator steps | `README.md` §9 |
 | Hardware facts, questions, offline install | `docs/hardware.md` |
+| What the judges score (A–G) + our evidence | `docs/EVIDENCE.md` |
 | Slide → code → proof | `docs/presentation_notes.md` |
 | All settings and on/off switches | `config.py`, `ardupilot/vision_hold.param` |
 | What a file does | the header at the top of every `.py` file |

@@ -18,9 +18,9 @@ import numpy as np
 from fusion.height import HeightFilter
 from fusion.imu_check import ImuCheck
 from tools.degrade_video import make_ground, render
-from vision.tracker import GroundTracker, load_calibration
+from vision.tracker import GroundTracker
 
-K, _ = load_calibration()
+from tests.common import K                  # fixed test camera (not the repo's calib.npz)
 ground = make_ground()
 rng = np.random.default_rng(4)
 

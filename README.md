@@ -6,6 +6,9 @@ Hold an Orqa M2-AI drone still over one spot with **no GPS**, using only a cheap
 FPV camera (Justice D, rolling shutter), the drone's own motion sensors, and the APB onboard computer.
 Whoever holds the steadiest position at the highest altitude wins.
 
+> **Team decision: flight controller firmware = ArduPilot (≥ 4.5).** Not pursuing PX4, INAV or the optional
+> Betaflight bonus route. `link/check_link.py` fails on anything else.
+
 ---
 
 ## Contents
@@ -206,7 +209,7 @@ DroneCode/
 │   ├── tracker.py            Saumya: Harris corners, Lucas-Kanade, forward-backward check, RANSAC
 │   ├── rolling_shutter.py    RollingShutterTracker = Saumya's tracker + per-row IMU correction
 │   ├── rehome.py             new reference picture while climbing (keeps holding as height changes)
-│   ├── enhance.py            local contrast boost (CLAHE) for high / hazy / flat-light views
+│   ├── enhance.py            picture prep: downscale to 640x360 (+ lens K) and local contrast boost
 │   ├── timing.py             when each image row was captured (readout time, delay)
 │   └── feature_filter.py     Saumya (to write): drop bad corners (legs in view, glare, moving things)
 │
@@ -260,8 +263,11 @@ DroneCode/
 │   ├── test_params.py        param file says what the code needs + loader works
 │   ├── test_rehome.py        climb 10 m → 40 m while holding
 │   ├── test_replay.py        record once, replay with settings toggled
-│   ├── test_truth_drift.py   real-drift calculator on a flight with known answers
-│   └── test_altitude.py      5–80 m sweep, normal and flat light, contrast boost on/off
+│   ├── test_truth_drift.py   real-drift calculator + ArduPilot log reader on known answers
+│   ├── test_altitude.py      5–80 m sweep, normal and flat light, contrast boost on/off
+│   ├── test_budget.py        stale-frame dropping: frame rate and data freshness
+│   ├── test_process_scale.py 1280x720 vs 640x360: same metres, less work
+│   └── common.py             the fixed test camera (tests never read the repo's calib.npz)
 │
 ├── deploy/
 │   ├── install.sh            one-shot setup on the APB (venv, self-test, boot service)
@@ -269,7 +275,8 @@ DroneCode/
 │
 ├── docs/
 │   ├── WORKLIST.md           TEAM TO-DO: every task with why / steps / done-when, phase by phase
-│   ├── hardware.md           what hardware we have (facts vs guesses), day-1 checklist, organiser questions
+│   ├── EVIDENCE.md           judging areas A–G: what we show, where it lives, what's missing
+│   ├── hardware.md           facts from the OEM manuals: camera, APB, ports, login, day-1 checklist
 │   └── presentation_notes.md slide → code → proof
 └── logs/                     flight CSVs and benchmark reports (git-ignored)
 ```
@@ -283,15 +290,17 @@ DroneCode/
 
 | Brief asks | Our answer | Code | Proof |
 |---|---|---|---|
-| **Sensor fusion pipeline** | Camera tracking + IMU-based tilt and rolling-shutter correction + IMU yaw cross-check + filtered height, then EKF3 fuses it with its IMU using our quality score and a height-scaled error | `vision/`, `fusion/`, `ardupilot/` | `test_tilt`: 94 cm → 9.8 cm fake drift at 10° tilt; `test_replay`: tilt off on the same recording 3.9 → 57.6 cm |
+| **Sensor fusion pipeline** | Camera tracking + IMU-based tilt and rolling-shutter correction + IMU yaw cross-check + filtered height, then EKF3 fuses it with its IMU using our quality score and a height-scaled error | `vision/`, `fusion/`, `ardupilot/` | `test_tilt`: 94 cm → 9.8 cm fake drift at 10° tilt; `test_replay`: tilt off on the same recording 3.8 → 50.2 cm |
 | **Rolling shutter** | Measure readout time + delay from video and IMU, then move every tracked point to the frame's mid-row time | `vision/rolling_shutter.py`, `vision/timing.py`, `calibration/calibrate_timing.py` | `test_rolling_shutter`: 30 ms readout measured as 29 ms; 92% of rolling-shutter error removed |
-| **Altitude (the trial)** | Re-home while climbing, contrast boost for flat/hazy views, EKF trusts us less as we climb | `vision/rehome.py`, `vision/enhance.py`, `link/drone_link.py` | `test_rehome`: 10 → 40 m climb, lost at 13.4 m without, 100% trusted with; `test_altitude`: flat light 40–80 m 0% → 91% trusted |
-| **Onboard compute** | Everything on the APB; every stage timed every frame; no stale frames | `compute/` | `compute.benchmark`: 6.9 ms/frame on a laptop incl. contrast boost (budget 33 ms). APB run to do |
+| **Altitude (the trial)** | Re-home while climbing, contrast boost for flat/hazy views, EKF trusts us less as we climb | `vision/rehome.py`, `vision/enhance.py`, `link/drone_link.py` | `test_rehome`: 10 → 40 m climb, lost at 13.4 m without, 98.8% trusted with (100% above 15 m); `test_altitude`: flat light 40–80 m 0% → 91% trusted (the maximum: the first 4 frames rebuild trust) |
+| **Onboard compute** | Everything on the APB; 1280×720 shrunk to 640×360 (same metres); every stage timed every frame; stale frames dropped by age | `compute/`, `vision/enhance.py` | `compute.benchmark`: ~7 ms/frame on a laptop (budget 33 ms); `test_budget`: 20 → 50 fps vs the old drop rule. APB run to do |
 | **Detect and recover** | Health + IMU check detect; quality −1 lets the EKF coast; ORB re-finds home; LAND after 3 s | `health/`, `fusion/imu_check.py`, `recovery/` | `test_recovery`: trusted again 0.2 s after 2 s and 10 s blackouts (never without it) |
 
 Slide-by-slide notes: [`docs/presentation_notes.md`](docs/presentation_notes.md).
 
-> **New to the team? Start here:** [`docs/WORKLIST.md`](docs/WORKLIST.md) (what to do next, with context) and [`docs/hardware.md`](docs/hardware.md) (what hardware we have).
+> **New to the team? Start here:** [`docs/WORKLIST.md`](docs/WORKLIST.md) (what to do next, with context),
+> [`docs/hardware.md`](docs/hardware.md) (what hardware we have) and [`docs/EVIDENCE.md`](docs/EVIDENCE.md)
+> (what the judges score, A–G, and our evidence for each).
 
 ---
 
@@ -309,7 +318,12 @@ pip install -r requirements.txt
 python -m tests.test_tracker       # should end with ALL TESTS PASSED
 ```
 
-On the APB: `sh deploy/install.sh` does all of the above and installs the boot service.
+**On the APB** (log in with `ssh root@192.168.75.1` over the USB-C cable, copy the repo with
+`rsync -avP DroneCode root@192.168.75.1:~`): `sh deploy/install.sh` does all of the above and installs
+(but doesn't enable) the boot service. On the APB, run everything as **`venv/bin/python -m ...`**.
+
+> **If the boot service is enabled, stop it before ANY manual run:** `systemctl stop vision_hold`.
+> Two programs on one camera or serial port break each other.
 
 > **Always run from the repo root** with `python -m folder.file` (not `python folder/file.py`),
 > otherwise imports and `calib.npz` won't be found.
@@ -321,23 +335,25 @@ On the APB: `sh deploy/install.sh` does all of the above and installs the boot s
 ### Once per camera (before the event)
 
 ```bash
-python -m calibration.auto_calibrate 1             # lens → calib.npz (show a checkerboard)
-python -m calibration.calibrate_timing --camera 1  # PROPS OFF, twist the drone 20 s → timing.npz
-python -m compute.benchmark                        # ON THE APB → logs/benchmark_*.md for the slide
+venv/bin/python -m tools.discover_hardware --route-fc-uart   # what's connected (camera number, FC port)
+venv/bin/python -m calibration.auto_calibrate 2               # lens → calib.npz (checkerboard, 1280x720)
+venv/bin/python -m calibration.calibrate_timing --camera 2 --connect /dev/ttymxc2   # PROPS OFF → timing.npz
+venv/bin/python -m compute.benchmark                          # → logs/benchmark_*.md for the slide
 ```
 
 ### Every flight
 
 ```bash
-python -m link.check_link --connect /dev/ttyAMA0   # must say PASS
-python vision_hold.py --connect /dev/ttyAMA0 --camera 1 --trigger rc
+systemctl stop vision_hold                                    # only if the boot service is running
+venv/bin/python -m link.check_link --connect /dev/ttymxc2     # must say PASS (ArduPilot >= 4.5, params)
+venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger rc --no-gps-fallback --record
 ```
 
 **ArduPilot settings** (once, drone disarmed, then reboot the flight controller):
 
 ```bash
-python -m ardupilot.load_params --connect /dev/ttyAMA0           # write + read back every value
-python -m ardupilot.load_params --connect /dev/ttyAMA0 --verify  # only check (check_link does this too)
+venv/bin/python -m ardupilot.load_params --connect /dev/ttymxc2           # write + read back every value
+venv/bin/python -m ardupilot.load_params --connect /dev/ttymxc2 --verify  # only check (check_link does too)
 ```
 
 What the settings do (details in the comments of `ardupilot/vision_hold.param`):
@@ -352,19 +368,24 @@ What the settings do (details in the comments of `ardupilot/vision_hold.param`):
 | Safety | `FS_EKF_ACTION 1`, `RC7_OPTION 0` | EKF failsafe lands; RC7 is our home switch |
 | From the spec | serial port, GPS off, rangefinder (commented out) | wrong serial port can break the RC receiver: fill in only from the spec |
 
-**In the air:** fly up in ALT_HOLD, then flip RC channel 7 → home is saved, and the program switches
-the EKF to vision once health says OK.
+`load_params` refuses to write while the motors are armed, never overwrites an RC channel that already has a
+function (unless `--force`), maps renamed parameters on newer ArduPilot (e.g. `ANGLE_MAX` → `ATC_ANGLE_MAX`), and
+fails if any parameter is missing.
+
+**In the air** (the event pilots fly): take off in ALT_HOLD → at the test position, channel 7 → home is saved
+and the program switches the EKF to vision once health says OK → the pilot engages the hold (LOITER).
+GPS may help during setup only, never in the scored hold: always `--no-gps-fallback` in the trial.
 
 Useful `vision_hold.py` options:
 
 | Option | Use |
 |---|---|
 | `--trigger rc / mode / start` | when to save home: RC switch (real flight), entering LOITER (simulator), at once (bench) |
-| `--camera 1` or `--camera video.mp4` | live camera or a recorded video |
+| `--camera 2` or `--camera video.mp4` | live camera by number or path (Justice D = `2` = `/dev/video2`) or a recorded video |
 | `--fixed-height 0.5` | bench test: webcam 0.5 m above a table |
 | `--show` | preview window with status |
 | `--no-gps-fallback` | never switch back to GPS |
-| `--record DIR` | also save raw video + times + attitude + height for replay |
+| `--record [DIR]` | also save grey 640×360 video + times + attitude + height for replay (no DIR: `/sdcard/rec_<time>`, or `logs/` without a card) |
 | `--replay DIR` | run on a recording instead of camera + drone (as fast as possible) |
 | `--set NAME=VALUE` | override a `config.py` setting, e.g. `--set USE_TILT=False` |
 | `--log PATH` | name of the flight log |
@@ -548,6 +569,8 @@ python -m tests.test_rehome             # climb 10 → 40 m (~1 min)
 python -m tests.test_replay             # record + replay + toggles (~1 min)
 python -m tests.test_truth_drift        # real-drift calculator
 python -m tests.test_altitude           # 5–80 m sweep (~1 min)
+python -m tests.test_budget             # stale-frame dropping
+python -m tests.test_process_scale      # 1280x720 vs 640x360
 ```
 
 The tests use a **camera simulator** (`tools/degrade_video.py: render()`) that draws what the
@@ -560,12 +583,17 @@ downward camera sees for any position, tilt and rolling-shutter timing, so every
 | Rolling shutter | readout 30 → 29 ms, delay −20 → −19 ms measured; 92% of rolling-shutter error removed |
 | IMU check | 20° disagreement rejected, agreement within 0.01° |
 | Recovery | 2 s and 10 s blackouts with 1–2 m drift: trusted again in 0.2 s (without recovery: never) |
-| Failsafe | fires once, 3.0 s after loss, re-arms after recovery |
-| Params | 32 settings match what the code needs; loader verifies, writes, flags unknown names; noise sent grows with height above ~40 m |
-| Re-home (climb 10 → 40 m) | without: trust lost at 13.4 m; with: 100% trusted above 15 m, 8 re-homes, error mean 7–8 cm, max 15 cm |
-| Replay | identical results on repeat; live run reproduced 90/90 frames; tilt fix off → error 3.9 → 57.6 cm; RS fix off → trusted frames 114 → 56 |
-| Truth drift | known drift / vision error / EKF error recovered per altitude band to < 1 cm |
-| Altitude sweep | error ~0.6 px at every height = 0.7 cm at 5 m → 12 cm at 80 m; flat light at 40–80 m: 0% trusted without contrast boost, 91% with it |
+| Failsafe | fires once, 3.0 s after loss, re-arms after recovery; resends the mode until the autopilot confirms (gives up after 5 and tells the pilot); fires when health says OK but no valid position is sent |
+| Params | 32 settings match what the code needs; loader verifies, writes, maps renamed params, won't overwrite a used RC channel; ArduPilot 4.4 flagged as too old; noise sent grows with height above ~40 m |
+| Re-home (climb 10 → 40 m) | without: trust lost at 13.4 m (15.8% trusted); with: 98.8% trusted (100% above 15 m), 8 re-homes, error mean 6.7–8.0 cm, max 15 cm |
+| Replay | identical results on repeat; live run (rocking attitude, RS fix on) reproduced 90/90 frames; tilt fix off → error 3.8 → 50.2 cm; RS fix off → trusted frames 94 → 56 |
+| Truth drift | known drift / vision error / EKF error recovered per altitude band to < 1 cm; log reader: hold start = switch to LOITER, 2nd GPS ignored, vision resets don't count as error |
+| Altitude sweep | error ~0.6 px at every height = 0.7 cm at 5 m → 12 cm at 80 m; flat light at 40–80 m: 0% trusted without contrast boost, 91% with it (= every frame after the 5-frame trust delay) |
+| Budget | 20 ms per frame, 1-frame queue: 20 → 50 fps vs the old rule; 4-frame queue: data age 76 → 22 ms |
+| Process scale | 1280×720 vs 640×360: positions agree within 0.02 cm |
+
+The simulated tests use a fixed test camera (`tests/common.py`), so committing the real Justice D calibration
+does not change these numbers.
 
 ---
 
@@ -582,6 +610,7 @@ New settings live in **`config.py`**. Saumya's settings stay at the top of her f
 | `USE_RECOVERY` | ORB re-find home |
 | `USE_REHOME` | new reference picture while climbing/descending (`REHOME_SCALE_MIN/MAX`) |
 | `USE_CLAHE` | local contrast boost before tracking + health (`CLAHE_CLIP`, `CLAHE_TILES`) |
+| `PROCESS_WIDTH` | shrink frames before tracking (640; `None` = full 1280×720) |
 | `FAILSAFE_ACTION` | `"LAND"` (default), `"ALT_HOLD"` or `"NONE"` |
 
 Switching one off and flying or replaying the same recording (`--replay DIR --set NAME=False`) gives the
@@ -600,7 +629,9 @@ Switching one off and flying or replaying the same recording (`--replay DIR --se
 - **Angles**: radians, ZYX (yaw, pitch, roll), same as ArduPilot's ATTITUDE message.
 - **Every new feature gets**: a header (plain words + technical + references), an on/off switch in
   `config.py`, and a test in `tests/` that prints a number for the slides.
-- **Run from the repo root** with `python -m ...`.
+- **Run from the repo root** with `python -m ...` (`venv/bin/python -m ...` on the APB).
+- **Stop the boot service before any manual run** (`systemctl stop vision_hold`).
+- **Flight controller: ArduPilot ≥ 4.5 only** (team decision).
 - **Commit to `main` only when agreed.** Use `git add -A` so moved files keep their history.
 
 ---
@@ -625,11 +656,14 @@ Switching one off and flying or replaying the same recording (`--replay DIR --se
 | ArduPilot param file + loader | ✅; **tune `VISO_DELAY_MS` after calibrate_timing** |
 | Trust that scales with height (ODOMETRY noise) | ✅; **tune `ODOM_PX_NOISE_*` from flight logs** |
 | SITL procedure | ✅ documented (section 9); **run it** |
-| Values from the technical spec | ⬜ `config.py`, hardware section of `ardupilot/vision_hold.param`, `deploy/` |
+| Values from the technical spec | 🟡 OEM facts in (`docs/hardware.md`, `deploy/`); Stage 2 items still open |
+| ArduPilot ≥ 4.5 build for the APB FC | ⬜ **confirm with the organisers** (stock firmware appears to be Betaflight) |
+| Justice D lens calibration | ⬜ `calib.npz` is still a webcam's: recalibrate at 1280×720 |
+| Evidence for judging areas A–G | 🟡 `docs/EVIDENCE.md` |
 
 **Known limits:** the tilt fix only corrects the main effect of tilting, leaving about 2 px of error
 at 5° and 9 px at 10° (see `fusion/tilt.py`). Rolling-shutter correction covers rotation only;
-movement during the 25 ms scan is tiny at altitude. Each re-home freezes in the error of that moment, so error
+movement during the ≤ 16.7 ms scan is tiny at altitude. Each re-home freezes in the error of that moment, so error
 can grow a little per re-home (climb test: 1.5 cm → 7–8 cm over 8 re-homes). Simulated terrain is a model:
 real ground texture at height must be checked on footage. Recommendation for Saumya: `health.BLUR_BAD` is an
 absolute threshold; making it relative to the home frame's sharpness would remove the flat-light false alarm

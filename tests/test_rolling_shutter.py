@@ -24,14 +24,14 @@ from fusion.tilt import cancel_tilt
 from tools.degrade_video import make_ground, render
 from vision.rolling_shutter import RollingShutterTracker, attitude_at
 from vision.timing import CameraTiming
-from vision.tracker import load_calibration, to_north_east
+from vision.tracker import to_north_east
 
 W, H = 640, 480
 HEIGHT = 4.16
 READOUT = 0.030               # true scan time
 DELAY = 0.020                 # frames reach us 20 ms after their middle row was captured
 FPS = 30
-K, _ = load_calibration()
+from tests.common import K                  # fixed test camera (not the repo's calib.npz)
 ground = make_ground()
 rng = np.random.default_rng(2)
 

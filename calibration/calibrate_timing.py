@@ -120,7 +120,9 @@ def estimate_readout(pairs, history, K, dist, rows, offset_s, max_readout_s=0.04
 
 # ---------------- Live calibration on the drone ----------------
 def main():
+    from compute.budget import make_low_latency
     from link.drone_link import DroneLink
+    from vision.enhance import downscale, scale_camera_matrix
     from vision.tracker import load_calibration
 
     ap = argparse.ArgumentParser(description="Measure camera readout time and camera-IMU offset")
@@ -136,11 +138,13 @@ def main():
     link = DroneLink(args.connect)
     link.start()
     cap = cv2.VideoCapture(int(args.camera) if args.camera.isdigit() else args.camera)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    make_low_latency(cap)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
 
+    # Record first, analyse afterwards: doing optical flow inside the loop would slow it down,
+    # frames would queue up and their delay would bias the measured offset (vs. flight).
     print(f"PROPS OFF. Twist and rock the drone over a textured floor for {args.seconds:.0f} s...")
-    history, pairs, prev, rows = [], [], None, None
+    history, frames = [], []
     t_end = time.time() + args.seconds
     while time.time() < t_end:
         ok, frame = cap.read()
@@ -150,16 +154,19 @@ def main():
         for s in list(link.attitudes):                    # keep our own full IMU recording
             if not history or s[0] > history[-1][0]:
                 history.append(s)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        rows = gray.shape[0]
-        if prev is not None:
-            pr = track_pair(prev[1], gray)
-            if pr:
-                pairs.append((prev[0], pr[0], t, pr[1]))
-        prev = (t, gray)
+        small = downscale(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))   # same size as in flight
+        if not frames:
+            K = scale_camera_matrix(K, small.shape[1] / frame.shape[1])
+        frames.append((t, small))
     link.running = False
     cap.release()
-    print(f"Recorded {len(pairs)} frame pairs and {len(history)} IMU samples.")
+    rows = frames[0][1].shape[0] if frames else None
+    pairs = []
+    for (t0, g0), (t1, g1) in zip(frames, frames[1:]):
+        pr = track_pair(g0, g1)
+        if pr:
+            pairs.append((t0, pr[0], t1, pr[1]))
+    print(f"Recorded {len(frames)} frames ({len(pairs)} usable pairs) and {len(history)} IMU samples.")
     if len(pairs) < 50 or len(history) < 50:
         print("Not enough data - check the camera and the MAVLink connection, then retry.")
         return
@@ -169,7 +176,7 @@ def main():
     readout, res, res0 = estimate_readout(pairs, history, K, dist, rows, offset, max_readout_s=1.0 / fps)
     print(f"Readout = {readout * 1000:.1f} ms   (fit residual {res0:.3f} px -> {res:.3f} px)")
     save_timing(readout, offset)
-    print("Saved timing.npz")
+    print("Saved timing.npz - commit it, and set VISO_DELAY_MS (WORKLIST 3.4)")
 
 
 if __name__ == "__main__":

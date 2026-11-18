@@ -5,8 +5,10 @@
 #   Run this before every flight. It connects to the autopilot exactly like the real
 #   program does and checks that everything vision_hold.py needs is actually arriving:
 #   attitude (fast enough for the rolling-shutter fix), height, the remote-control
-#   switch, the flight mode, and that EVERY setting in ardupilot/vision_hold.param is
-#   what the autopilot really has. Ends with PASS or a list of what to fix. ~10 seconds.
+#   switch, the flight mode, that the flight controller runs ArduPilot >= 4.5 (team decision;
+#   older versions would fuse our "no data" packets), and that EVERY setting in
+#   ardupilot/vision_hold.param is what the autopilot really has (missing = failure).
+#   Ends with PASS or a list of what to fix. ~10 seconds. Read-only: changes nothing.
 #
 # HOW IT WORKS (technical)
 #   Uses link/drone_link.DroneLink (the same background reader). Rates are measured by
@@ -27,7 +29,8 @@ import math
 import sys
 import time
 
-from ardupilot.load_params import apply, parse_param_file, print_table
+import config
+from ardupilot.load_params import apply, firmware, parse_param_file, print_table
 from link.drone_link import DroneLink
 
 MIN_ATTITUDE_HZ = 40
@@ -41,12 +44,22 @@ def main():
     link = DroneLink(args.connect)
     link.start()
     link.check_params()                            # prints its own warnings
+    problems = []
+    autopilot, version = firmware(link)            # read-only
+    need = config.MIN_ARDUPILOT_VERSION
+    print(f"Firmware : {autopilot} {'.'.join(map(str, version)) if version else '(version unknown)'}")
+    if "ARDUPILOT" not in autopilot:
+        problems.append(f"flight controller runs {autopilot}: the team runs ArduPilot only")
+    elif version is None:
+        problems.append("could not read the ArduPilot version (AUTOPILOT_VERSION) - check it by hand")
+    elif version < need:
+        problems.append(f"ArduPilot {'.'.join(map(str, version))} < {'.'.join(map(str, need))}: before 4.5 "
+                        f"the autopilot ignores our 'no data' quality flag and would fuse invalid positions")
     n0, t0 = len(link.attitudes), time.time()
     time.sleep(3.0)
     samples = [a for a in list(link.attitudes) if a[0] >= t0]
     rate = len(samples) / (time.time() - t0)
     now = time.time()
-    problems = []
 
     print(f"\nAttitude : {rate:5.1f} Hz", end="")
     if samples:
@@ -70,9 +83,12 @@ def main():
     rows = apply(link, parse_param_file(), verify_only=True)
     print_table(rows)
     wrong = [r[0] for r in rows if r[4] == "WRONG"]
+    missing = [r[0] for r in rows if r[4] == "NOT FOUND"]
     if wrong:
         problems.append(f"parameters not as in vision_hold.param: {', '.join(wrong)} "
                         f"(fix: python -m ardupilot.load_params, then reboot)")
+    if missing:
+        problems.append(f"parameters NOT FOUND on this firmware: {', '.join(missing)} (wrong firmware/version?)")
 
     link.running = False
     if problems:
