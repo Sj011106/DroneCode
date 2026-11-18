@@ -41,6 +41,8 @@ import csv
 import os
 import time
 import math
+import config
+from handover import Handover, REANCHOR
 
 import cv2
 import numpy as np
@@ -68,7 +70,7 @@ from vision.timing import load_timing
 # ---------------- Settings ----------------
 CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttyAMA0" or "COM5"
 
-HOME_TRIGGER = "mode"   # when to save HOME (replaces the 'r' key):
+HOME_TRIGGER = "start"  # when to save HOME (replaces the 'r' key):
                         #  "mode"  = when the pilot switches into a mode in HOLD_MODES
                         #  "rc"    = when a switch on the remote (HOME_RC_CHANNEL) is flipped ON
                         #  "start" = as soon as the camera sees enough ground (bench tests)
@@ -77,7 +79,7 @@ HOME_RC_CHANNEL = 7                 # for "rc": real GPS-denied flights (fly ALT
 RC_ON_PWM = 1700                    # switch counts as ON above this
 MIN_HOME_CORNERS = 50               # don't save home over a blank floor
 
-FALLBACK_TO_GPS = True   # LOST -> switch the autopilot back to GPS (needs a GPS fitted)
+FALLBACK_TO_GPS = False  # GPS is jammed in this challenge (LOST -> switch back to GPS needs a GPS fitted)
 MIN_HEIGHT_M = 0.3       # below this the picture is too close / we're landing -> don't send
 MAX_SECONDS = None       # stop after this long (None = run until Ctrl+C)
 
@@ -187,6 +189,9 @@ def main(argv=None):                                             # NEW: argv for
         print(f"Recording to {rec_dir}")
     fallback = FALLBACK_TO_GPS and not args.no_gps_fallback
 
+    handover = Handover(failsafe_after_s=config.FAILSAFE_AFTER_S,
+                        failsafe_mode=config.FAILSAFE_ACTION)
+
     os.makedirs("logs", exist_ok=True)
     log_path = args.log or time.strftime("logs/flight_%Y%m%d_%H%M%S.csv")   # NEW: --log
     log_file = open(log_path, "w", newline="")
@@ -198,6 +203,7 @@ def main(argv=None):                                             # NEW: argv for
                   "ms_grab", "ms_track", "ms_health", "ms_fusion", "ms_send", "ms_total", "rehomes"])
 
     home_saved, home_pending, reset_counter, last_texture_warn = False, False, 0, 0.0
+    reanchor_request = False                                 # Part D: set by handover, recorded like a trigger
     want_source, last_source_try = None, 0.0
     last_heartbeat, last_origin_try, last_frame_ok = 0.0, 0.0, time.time()
     prev_ne, vel_ned = None, np.zeros(3)
@@ -223,8 +229,13 @@ def main(argv=None):                                             # NEW: argv for
             t_read = time.time()                                 # NEW: how long read() waits (budget)
             ok, frame = cap.read()
             t_capture = clock()                                  # NEW: was time.time()
-            if not ok and is_camera and home_saved:              # NEW: dead camera while on vision ->
-                failsafe.step(link.acked_source == SRC_VISION, t_capture, link)   # failsafe timer runs
+            if not ok and is_camera and home_saved:              # Part D: dead camera = quality 0
+                for action in handover.update(t_capture, link.conn.flightmode, 0):
+                    if action == REANCHOR:
+                        reanchor_request = True
+                    else:
+                        print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
+                        link.conn.set_mode(action[1])
             if not ok:
                 if not is_camera:
                     print("Video finished.")
@@ -250,7 +261,8 @@ def main(argv=None):                                             # NEW: argv for
             prof.lap("grab")                                     # NEW
 
             # ---------- 2. Home trigger (replaces 'r') ----------
-            fired = trigger.fired(link)                          # NEW: kept for the recorder
+            fired = trigger.fired(link) or reanchor_request      # Part D: engage re-anchor is recorded too
+            reanchor_request = False
             if recorder:                                         # NEW: record raw inputs
                 recorder.add(small, t_capture, fired, link.height(t_capture), atts,
                              orig_size=(frame.shape[1], frame.shape[0]))
@@ -352,9 +364,13 @@ def main(argv=None):                                             # NEW: argv for
                 link.set_source(want_source)                     # retried until the autopilot says OK
                 last_source_try = now
 
-            # NEW: no VALID position for too long while the autopilot relies on vision -> safe mode
-            # (covers LOST, but also IMU disagreement / no height while health still says OK)
-            failsafe.step(quality <= 0 and link.acked_source == SRC_VISION, now, link)
+            # Part D: pilot handover. Only acts while the pilot has selected a hold mode.
+            for action in handover.update(now, link.conn.flightmode, quality):
+                if action == REANCHOR:
+                    reanchor_request = True                      # next frame saves home + bumps reset_counter
+                else:
+                    print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
+                    link.conn.set_mode(action[1])
 
             prof.end_frame()                                     # NEW
             ms = prof.current

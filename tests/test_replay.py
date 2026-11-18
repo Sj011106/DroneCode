@@ -191,13 +191,36 @@ for i in range(int(7 * FPS)):
     img = render(ground, K, (W, H), pose, t, readout_s=config.READOUT_S, noise=2, rng=rng)
     rec.add(img, t, i == 0, HEIGHT if i < 2 * FPS else None, [s for s in imu if s[0] <= t])
 rec.close()
-out = io.StringIO()
-with contextlib.redirect_stdout(out):
-    rows = replay(rec_dir, "noheight")
-text = out.getvalue()
+import tools.replay as _tr
+
+
+def run_noheight(mode, name):
+    """Replay the no-height recording with the fake autopilot in flight mode `mode`."""
+    orig_init = _tr._ReplayConn.__init__
+
+    def init(self):
+        orig_init(self)
+        if mode:
+            self.flightmode = mode
+            self.set_mode = lambda m: setattr(self, "flightmode", m)   # autopilot obeys (else Handover resends)
+    _tr._ReplayConn.__init__ = init
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            r = replay(rec_dir, name)
+    finally:
+        _tr._ReplayConn.__init__ = orig_init
+    return r, [l for l in buf.getvalue().splitlines() if l.startswith("FAILSAFE")]
+
+
+# 1. pilot in a non-hold mode ("REPLAY"): the pilot always wins -> no failsafe
+rows, fired = run_noheight(None, "noheight")
 ok_no_pos = sum(r["status"] == "OK" and r["north_m"] == "nan" for r in rows)
-fired = [l for l in text.splitlines() if l.startswith("FAILSAFE")]
-print(f"  frames with status OK but no position: {ok_no_pos}; failsafe messages: {fired[:2]}")
+print(f"  frames with status OK but no position: {ok_no_pos}; failsafe messages (REPLAY mode): {fired[:2]}")
 assert ok_no_pos > 2 * FPS, "health should still say OK while the height is missing"
-assert any("-> LAND" in l for l in fired), "failsafe must fire when no valid position is sent"
+assert not fired, "failsafe must NOT act while the flight mode is not a hold mode"
+# 2. pilot in LOITER: the failsafe may take over
+rows, fired = run_noheight("LOITER", "noheight_loiter")
+print(f"  failsafe messages (LOITER mode): {fired[:2]}")
+assert len(fired) == 1 and "-> LAND" in fired[0], "failsafe must fire exactly once (LAND) in a hold mode"
 print("\nALL REPLAY TESTS PASSED")
