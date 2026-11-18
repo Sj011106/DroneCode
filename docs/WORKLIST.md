@@ -421,3 +421,15 @@ ArduPilot version, and the exact drift thresholds.
 | Slide → code → proof | `docs/presentation_notes.md` |
 | All settings and on/off switches | `config.py`, `ardupilot/vision_hold.param` |
 | What a file does | the header at the top of every `.py` file |
+
+## Part D: open items (branch praiseChopdePartD)
+
+| # | Question for organizers | Why it matters | Where to change |
+|---|---|---|---|
+| 1 | Which flight-mode switch position gives LOITER/POSHOLD? | Engaging the hold = pilot selects LOITER/POSHOLD | FLTMODE* params (not set yet) |
+| 2 | On vision loss during a hold: LAND, ALT_HOLD, or wait for the pilot? | Failsafe action | `FAILSAFE_ACTION` in config.py, `FS_EKF_ACTION` in vision_hold.param |
+| 3 | Which firmware and version is on the flight controller? | Code assumes ArduPilot >= 4.5 | `check_link` |
+| 4 | Which UART links the APB to the flight controller? | Wrong serial setting can disable the RC receiver | SERIAL* params (not set yet) |
+
+Done: pilot handover (handover.py), failsafe only acts in LOITER/POSHOLD, disengage returns control to the pilot, GPS fallback off. RC7_OPTION = 0 already set.
+Not yet proven: engage/disengage with real ArduPilot (needs SITL).
