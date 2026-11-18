@@ -128,6 +128,9 @@ class FakeLink:
         self.send_lock, self.attitudes = threading.Lock(), deque(maxlen=200)
         self.rc, self.origin_set, self.acked_source, self.local_z, self.running = {}, True, None, None, True
 
+    def mode_age(self):
+        return 0.0                                         # fake autopilot: mode always fresh
+
     def start(self):
         def feed():
             while self.running:

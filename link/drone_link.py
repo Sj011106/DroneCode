@@ -95,7 +95,12 @@ class DroneLink:
         self.acked_source = None             # source set the autopilot CONFIRMED
         self.pending_source = None           # source set we last ASKED for
         self.params = {}
+        self.mode_time = None                # monotonic time of the last autopilot HEARTBEAT
         self.running = True
+
+    def mode_age(self):
+        """Seconds since the last autopilot HEARTBEAT (inf if none yet)."""
+        return float("inf") if self.mode_time is None else time.monotonic() - self.mode_time
 
     def start(self):
         print(f"Connecting to {self.conn.address} ...")
@@ -124,6 +129,11 @@ class DroneLink:
                 self.local_z = (now, msg.z)
             elif kind == "RC_CHANNELS":
                 self.rc = {i: getattr(msg, f"chan{i}_raw") for i in range(1, 17)}
+            elif kind == "HEARTBEAT":
+                if (msg.get_srcSystem() == self.conn.target_system
+                        and msg.get_srcComponent() == self.conn.target_component
+                        and msg.type != mavutil.mavlink.MAV_TYPE_GCS):
+                    self.mode_time = time.monotonic()      # only the autopilot's heartbeat
             elif kind == "GPS_GLOBAL_ORIGIN":
                 self.origin_set = True
             elif kind == "PARAM_VALUE":

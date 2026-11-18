@@ -78,3 +78,22 @@ def test_reengage_reanchors_again():
     h = Handover()
     acts = run(h, [(0, "LOITER", 80), (1, "STABILIZE", 80), (2, "POSHOLD", 80)])
     assert acts == [REANCHOR, REANCHOR]
+
+
+def test_stale_mode_never_sends_set_mode_until_fresh():
+    h = Handover(failsafe_after_s=3.0)
+    h.update(0.0, "LOITER", 80)
+    # vision lost from 1.0 s to 5.9 s while the autopilot heartbeat is stale: no SET_MODE
+    for i in range(10, 60):
+        assert h.update(i * 0.1, "LOITER", 0, mode_fresh=False) == []
+    assert h.state == FAILSAFE
+    # heartbeat fresh again: the first SET_MODE is sent now
+    assert h.update(6.0, "LOITER", 0, mode_fresh=True) == [("SET_MODE", "LAND")]
+
+
+def test_gave_up_once_after_max_sends_ignored():
+    h = Handover(resend_s=1.0, max_sends=5)
+    steps = [(0, "LOITER", 80)] + [(1 + i * 0.1, "LOITER", 0) for i in range(200)]
+    acts = run(h, steps)
+    assert acts.count(("SET_MODE", "LAND")) == 5
+    assert acts.count(("GAVE_UP",)) == 1

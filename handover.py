@@ -21,14 +21,16 @@ class Handover:
         self.resend_s = resend_s                # resend if the mode didn't change
         self.max_sends = max_sends
         self.sent_at, self.sends = None, 0
+        self.gave_up = False                    # ("GAVE_UP",) is returned once per failsafe
 
     @property
     def engaged(self):
         return self.state != MANUAL
 
-    def update(self, now, flight_mode, quality):
-        """now: time.monotonic(). Returns a list of actions:
-        "REANCHOR" or ("SET_MODE", mode). Empty list = do nothing."""
+    def update(self, now, flight_mode, quality, mode_fresh=True):
+        """now: the caller's clock (clock() in vision_hold.py). Returns a list of actions:
+        "REANCHOR", ("SET_MODE", mode), or ("GAVE_UP",). Empty list = do nothing.
+        mode_fresh=False (no recent autopilot heartbeat) never returns SET_MODE."""
         in_hold = flight_mode in self.hold_modes
 
         # Rule 1: pilot is not in a hold mode -> the pilot wins.
@@ -45,8 +47,13 @@ class Handover:
 
         # Failsafe sent but still in a hold mode: resend a few times.
         if self.state == FAILSAFE:
-            if self.sends < self.max_sends and now - self.sent_at >= self.resend_s:
-                return self._send(now)
+            if self.sent_at is not None and now - self.sent_at < self.resend_s:
+                return []
+            if self.sends < self.max_sends:
+                return self._send(now, mode_fresh)
+            if not self.gave_up:
+                self.gave_up = True
+                return [("GAVE_UP",)]
             return []
 
         # Rule 3: vision is OK.
@@ -62,11 +69,13 @@ class Handover:
         if (now - self.lost_since >= self.failsafe_after_s
                 and self.failsafe_mode != "NONE"):
             self.state = FAILSAFE
-            self.sends = 0
-            return self._send(now)
+            self.sends, self.sent_at, self.gave_up = 0, None, False
+            return self._send(now, mode_fresh)
         return []
 
-    def _send(self, now):
+    def _send(self, now, mode_fresh):
+        if not mode_fresh:                      # autopilot mode data is stale: wait
+            return []
         self.sent_at = now
         self.sends += 1
         return [("SET_MODE", self.failsafe_mode)]

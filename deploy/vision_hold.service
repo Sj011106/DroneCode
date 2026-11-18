@@ -33,7 +33,7 @@ WorkingDirectory=@DIR@
 # Route UART3 (/dev/ttymxc2) to the flight controller first (APB manual p.14):
 ExecStartPre=/usr/bin/env gpioset -t0 -c gpiochip3 13=1
 ExecStartPre=/usr/bin/env gpioset -t0 -c gpiochip3 0=0
-ExecStart=@DIR@/venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger rc --no-gps-fallback
+ExecStart=@DIR@/venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --no-gps-fallback
 # always: also restart after a clean exit (e.g. "Camera lost for 5 s - stopping.")
 Restart=always
 RestartSec=2

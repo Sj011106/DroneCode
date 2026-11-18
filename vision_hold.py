@@ -50,6 +50,7 @@ import numpy as np
 from vision.tracker import load_calibration, to_north_east
 from health.health import HealthChecker
 from link.drone_link import DroneLink, SRC_GPS, SRC_VISION
+from pymavlink import mavutil
 
 # NEW (added on top of Saumya's pipeline; each one can be switched off in config.py):
 import signal
@@ -189,8 +190,9 @@ def main(argv=None):                                             # NEW: argv for
         print(f"Recording to {rec_dir}")
     fallback = FALLBACK_TO_GPS and not args.no_gps_fallback
 
-    handover = Handover(failsafe_after_s=config.FAILSAFE_AFTER_S,
-                        failsafe_mode=config.FAILSAFE_ACTION)
+    handover = Handover(hold_modes=HOLD_MODES, failsafe_after_s=config.FAILSAFE_AFTER_S,
+                        failsafe_mode=config.FAILSAFE_ACTION,
+                        max_sends=config.FAILSAFE_MODE_RETRIES)
 
     os.makedirs("logs", exist_ok=True)
     log_path = args.log or time.strftime("logs/flight_%Y%m%d_%H%M%S.csv")   # NEW: --log
@@ -204,6 +206,7 @@ def main(argv=None):                                             # NEW: argv for
 
     home_saved, home_pending, reset_counter, last_texture_warn = False, False, 0, 0.0
     reanchor_request = False                                 # Part D: set by handover, recorded like a trigger
+    last_cam_warn = 0.0                                      # Part D: camera-dead warning at most every 5 s
     want_source, last_source_try = None, 0.0
     last_heartbeat, last_origin_try, last_frame_ok = 0.0, 0.0, time.time()
     prev_ne, vel_ned = None, np.zeros(3)
@@ -230,9 +233,14 @@ def main(argv=None):                                             # NEW: argv for
             ok, frame = cap.read()
             t_capture = clock()                                  # NEW: was time.time()
             if not ok and is_camera and home_saved:              # Part D: dead camera = quality 0
-                for action in handover.update(t_capture, link.conn.flightmode, 0):
+                for action in handover.update(t_capture, link.conn.flightmode, 0,
+                                              mode_fresh=link.mode_age() < 1.5):
                     if action == REANCHOR:
                         reanchor_request = True
+                    elif action[0] == "GAVE_UP":
+                        msg = f"FAILSAFE: autopilot ignored {link.conn.flightmode} after {handover.max_sends} tries - PILOT MUST TAKE OVER"
+                        print(msg)
+                        link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, msg[:50].encode())
                     else:
                         print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
                         link.conn.set_mode(action[1])
@@ -240,9 +248,9 @@ def main(argv=None):                                             # NEW: argv for
                 if not is_camera:
                     print("Video finished.")
                     break
-                if t_capture - last_frame_ok > 5.0:
-                    print("Camera lost for 5 s - stopping.")
-                    break
+                if t_capture - last_frame_ok > 5.0 and t_capture - last_cam_warn >= 5.0:
+                    print("Camera lost for 5 s - still running on the last data; check the camera.")
+                    last_cam_warn = t_capture
                 if home_saved:                                   # tell the autopilot: no data
                     att = link.attitude_at(t_capture) or (0.0, 0.0, 0.0)
                     link.send_odometry(t_capture, 0.0, 0.0, 0.0, att, (0, 0, 0), -1, reset_counter)
@@ -365,9 +373,14 @@ def main(argv=None):                                             # NEW: argv for
                 last_source_try = now
 
             # Part D: pilot handover. Only acts while the pilot has selected a hold mode.
-            for action in handover.update(now, link.conn.flightmode, quality):
+            for action in handover.update(now, link.conn.flightmode, quality,
+                                          mode_fresh=link.mode_age() < 1.5):
                 if action == REANCHOR:
                     reanchor_request = True                      # next frame saves home + bumps reset_counter
+                elif action[0] == "GAVE_UP":
+                    msg = f"FAILSAFE: autopilot ignored {link.conn.flightmode} after {handover.max_sends} tries - PILOT MUST TAKE OVER"
+                    print(msg)
+                    link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, msg[:50].encode())
                 else:
                     print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
                     link.conn.set_mode(action[1])

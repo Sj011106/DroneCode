@@ -181,6 +181,9 @@ class ReplayLink(DroneLink):
     def set_source(self, n):
         self.pending_source = self.acked_source = n
 
+    def mode_age(self):
+        return 0.0                                         # replay: the mode is always fresh
+
     def feed_until(self, t):
         """Deliver the attitude samples that had arrived by time t."""
         while self._next_att < len(self._att) and self._att[self._next_att][0] <= t:
