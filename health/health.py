@@ -29,7 +29,11 @@ import numpy as np
 # ---------------- Settings you can tune (on YOUR camera!) ----------------
 DARK_LIMIT, BRIGHT_LIMIT = 25, 230   # average brightness outside this = can't see
 BLUR_BAD, BLUR_GOOD = 30.0, 150.0    # Laplacian variance: below BAD = too blurry
-FROZEN_DIFF = 0.3        # frames this similar (avg grey-level change) = "same picture"
+                                     # (retune on Justice D footage: python -m health.health stats <video>)
+FROZEN_DIFF = 0.02       # frames this similar (avg grey-level change) = "same picture".
+                         # Was 0.3: the Justice D's noise reduction (AI-DNR) makes frames of a
+                         # perfect hover almost identical, which 0.3 called "frozen". A really
+                         # frozen camera repeats the SAME buffer: difference ~0.
 FROZEN_FRAMES = 5        # ...for this many frames in a row = camera is frozen
 MIN_INLIERS, GOOD_INLIERS = 15, 80
 MIN_INLIER_RATIO, GOOD_INLIER_RATIO = 0.3, 0.8
@@ -55,18 +59,50 @@ def _score(value, bad, good):
     return float(np.clip((value - bad) / (good - bad), 0.0, 1.0))
 
 
-def spread_fraction(points, width, height, grid=SPREAD_GRID):
-    """What fraction of the grid cells contain at least one point?"""
+def spread_fraction(points, width, height, grid=SPREAD_GRID, valid_cells=None):
+    """What fraction of the grid cells contain at least one point?
+    valid_cells = set of (col, row) where corners are allowed (feature-filter mask);
+    None = all cells. Cells the mask blocks (props, OSD text) can never have points,
+    so they don't count against the spread."""
     if len(points) == 0:
         return 0.0
     col = np.clip((points[:, 0] * grid / width).astype(int), 0, grid - 1)
     row = np.clip((points[:, 1] * grid / height).astype(int), 0, grid - 1)
-    return len(set(zip(col.tolist(), row.tolist()))) / (grid * grid)
+    hit = set(zip(col.tolist(), row.tolist()))
+    if valid_cells is None:
+        return len(hit) / (grid * grid)
+    if not valid_cells:
+        return 0.0
+    return len(hit & valid_cells) / len(valid_cells)
+
+
+def mask_cells(mask, grid=SPREAD_GRID, min_allowed=0.5):
+    """Grid cells (col, row) where at least min_allowed of the pixels are allowed."""
+    h, w = mask.shape[:2]
+    cells = set()
+    for r in range(grid):
+        for c in range(grid):
+            cell = mask[r * h // grid:(r + 1) * h // grid, c * w // grid:(c + 1) * w // grid]
+            if cell.size and (cell > 0).mean() >= min_allowed:
+                cells.add((c, r))
+    return cells
 
 
 class HealthChecker:
-    def __init__(self):
+    def __init__(self, mask=None):
+        # Same mask as the tracker's feature filter (0/255 image, None = no mask = old
+        # behaviour). Set by feature_filter.attach(tracker, health).
+        self.mask = mask
+        self._cells = {}          # (h, w) -> allowed grid cells
         self.reset()
+
+    def _valid_cells(self, h, w):
+        if self.mask is None:
+            return None
+        if (h, w) not in self._cells:
+            m = cv2.resize(self.mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            self._cells[(h, w)] = mask_cells(m)
+        return self._cells[(h, w)]
 
     def reset(self):
         """Call this whenever a new HOME is saved."""
@@ -113,7 +149,7 @@ class HealthChecker:
         else:
             # 5. Enough agreeing points?
             ratio = res.n_inliers / max(res.n_fb_ok, 1)
-            spread = spread_fraction(res.inlier_pts, w, h)
+            spread = spread_fraction(res.inlier_pts, w, h, valid_cells=self._valid_cells(h, w))
             d.update(inliers=res.n_inliers, inlier_ratio=ratio, spread=spread,
                      fb_median=res.fb_median_px, scale=res.scale, rotation=res.rotation_deg)
             if res.n_inliers < MIN_INLIERS:
@@ -179,3 +215,45 @@ class HealthChecker:
             self.prev_shift_t = res.t_capture
 
         return HealthReport(quality=quality, status=status, reasons=fails, details=d)
+
+
+# ---------------- Tuning helper: what do real frames score? ----------------
+def main(argv=None):
+    """python -m health.health stats <video or recording folder>
+    Prints brightness and sharpness (Laplacian variance) of the frames, processed the same
+    way as in flight (downscaled + contrast boost), so BLUR_BAD / BLUR_GOOD and
+    DARK_LIMIT / BRIGHT_LIMIT can be set from real Justice D footage instead of a webcam."""
+    import argparse
+    import os
+
+    from vision.enhance import downscale, enhance
+
+    ap = argparse.ArgumentParser(description="Brightness / sharpness of real frames")
+    ap.add_argument("cmd", choices=["stats"])
+    ap.add_argument("source", help="video file or tools/replay.py recording folder")
+    args = ap.parse_args(argv)
+    src = os.path.join(args.source, "video.avi") if os.path.isdir(args.source) else args.source
+    cap = cv2.VideoCapture(src)
+    bright, sharp = [], []
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = enhance(downscale(gray))
+        bright.append(float(gray.mean()))
+        sharp.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+    cap.release()
+    if not sharp:
+        raise SystemExit(f"No frames in {src}")
+    p = lambda v, q: float(np.percentile(v, q))
+    print(f"{len(sharp)} frames at {gray.shape[1]}x{gray.shape[0]}")
+    print(f"brightness: min {min(bright):.0f}  median {p(bright, 50):.0f}  max {max(bright):.0f}"
+          f"   (limits now {DARK_LIMIT}..{BRIGHT_LIMIT})")
+    print(f"sharpness : 5% {p(sharp, 5):.0f}  median {p(sharp, 50):.0f}  95% {p(sharp, 95):.0f}"
+          f"   (BLUR_BAD={BLUR_BAD:.0f}, BLUR_GOOD={BLUR_GOOD:.0f})")
+    print("Rule of thumb on footage you'd call 'fine': BLUR_GOOD ~ median, BLUR_BAD ~ 1/3 of the 5% value.")
+
+
+if __name__ == "__main__":
+    main()

@@ -34,6 +34,33 @@ ORIGIN_LAT, ORIGIN_LON, ORIGIN_ALT_M = 45.4215, -75.6972, 70.0   # Ottawa
 SRC_GPS, SRC_VISION = 1, 2
 
 
+class LockedDeque(deque):
+    """A deque that is safe to read while another thread appends to it.
+
+    Why: the reader thread appends ATTITUDE samples ~50 times a second while the main
+    loop copies the history (list(link.attitudes), min(...)). Iterating a plain deque
+    while it is being appended raises "RuntimeError: deque mutated during iteration",
+    which would stop vision_hold in flight. Appending and iterating now share one lock,
+    and iterating returns a frozen copy, so every existing caller is safe unchanged."""
+
+    def __init__(self, iterable=(), maxlen=None):
+        self._lock = threading.Lock()
+        super().__init__(iterable, maxlen)
+
+    def append(self, item):
+        with self._lock:
+            super().append(item)
+
+    def __iter__(self):
+        with self._lock:
+            items = list(super().__iter__())
+        return iter(items)
+
+    def snapshot(self):
+        """A list copy of the history, taken safely in one go."""
+        return list(self)
+
+
 def euler_to_quaternion(roll, pitch, yaw):
     """(roll, pitch, yaw) in radians -> quaternion [w, x, y, z] (what MAVLink wants)."""
     cr, sr = math.cos(roll / 2), math.sin(roll / 2)
@@ -60,7 +87,7 @@ class DroneLink:
     def __init__(self, connection):
         self.conn = mavutil.mavlink_connection(connection, baud=BAUD, autoreconnect=True)
         self.send_lock = threading.Lock()
-        self.attitudes = deque(maxlen=200)   # (local time, roll, pitch, yaw) ~4 s of history
+        self.attitudes = LockedDeque(maxlen=200)   # (local time, roll, pitch, yaw) ~4 s; thread-safe
         self.rangefinder = None              # (local time, metres)
         self.local_z = None                  # (local time, z) from LOCAL_POSITION_NED (down = +)
         self.rc = {}                         # channel number -> PWM
@@ -156,9 +183,11 @@ class DroneLink:
     # ----- reading -----
     def attitude_at(self, t):
         """The roll/pitch/yaw reading closest in time to t (the frame's capture time)."""
-        if not self.attitudes:
+        history = list(self.attitudes)           # one safe copy (LockedDeque: taken under its lock;
+                                                 # replay's plain deque: single-threaded anyway)
+        if not history:
             return None
-        return min(self.attitudes, key=lambda a: abs(a[0] - t))[1:]
+        return min(history, key=lambda a: abs(a[0] - t))[1:]
 
     def height(self, now):
         """Height above ground: rangefinder if fresh, else the autopilot's barometer height."""

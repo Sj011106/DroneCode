@@ -61,7 +61,18 @@ FB_MAX_ERROR_PX = 1.0    # forward-backward check: point must come back within 1
 RANSAC_THRESH_PX = 2.0   # RANSAC: a point is an "inlier" if it fits within 2 px
 MIN_POINTS = 8           # need at least this many points to try RANSAC
 MIN_INLIERS_TO_UPDATE = 15  # only trust a result enough to use it as the next prediction
-DEFAULT_FOCAL_PX = 600.0    # used only if calib.npz is missing
+# Used only if calib.npz is missing. Justice D datasheet: 1280x720, horizontal FOV 114 deg.
+# Focal length in pixels = (image width / 2) / tan(HFOV / 2), so it depends on the width
+# we track at: ~416 px at 1280 wide, ~208 px at the 640 wide frames vision_hold.py uses.
+DEFAULT_HFOV_DEG = 114.0
+
+
+def focal_from_fov(width_px, hfov_deg=DEFAULT_HFOV_DEG):
+    """Pinhole focal length (pixels) of a camera with this horizontal field of view."""
+    return (width_px / 2) / math.tan(math.radians(hfov_deg) / 2)
+
+
+DEFAULT_FOCAL_PX = focal_from_fov(640)   # ~208 px: the 640x360 frames we fly with
 
 
 # ---------------- The result the tracker hands to everyone else ----------------
@@ -82,12 +93,54 @@ class TrackResult:
     reason: str = ""                 # why it failed (empty if ok)
 
 
-def load_calibration(path="calib.npz"):
-    """Read camera matrix K and lens distortion from calibrate.py's output."""
-    if os.path.exists(path):
-        data = np.load(path)
-        return data["K"].astype(np.float64), data["dist"].astype(np.float64)
-    return None, None
+def calibration_size(path="calib.npz"):
+    """The (width, height) the calibration was made at, or None if the file doesn't say
+    (old files from calibrate.py, and the laptop-webcam calib.npz, have no size)."""
+    if not os.path.exists(path):
+        return None
+    data = np.load(path)
+    if "size" not in data.files:
+        return None
+    w, h = (int(v) for v in np.asarray(data["size"]).ravel()[:2])
+    return w, h
+
+
+def load_calibration(path="calib.npz", image_size=None):
+    """Read camera matrix K and lens distortion from calibrate.py's output.
+
+    image_size = (width, height) of the frames K will be used on (optional). If given:
+      - the file's saved size matches     -> K as saved
+      - same shape, different size        -> K rescaled to image_size (printed)
+      - different shape, or no size saved -> warning; the shape mismatch returns
+        (None, None) so the tracker falls back to the datasheet focal length instead of
+        using a lens file from another camera (wrong metres, silently).
+    Without image_size it behaves exactly as before."""
+    if not os.path.exists(path):
+        return None, None
+    data = np.load(path)
+    K, dist = data["K"].astype(np.float64), data["dist"].astype(np.float64)
+    if image_size is None:
+        return K, dist
+    saved = calibration_size(path)
+    w, h = image_size
+    if saved is None:
+        print(f"WARNING: {path} has no saved image size - can't check it matches the "
+              f"{w}x{h} camera. Recalibrate with calibration.auto_calibrate.")
+        return K, dist
+    sw, sh = saved
+    if (sw, sh) == (w, h):
+        return K, dist
+    if abs(sw * h - sh * w) > max(sw, w):        # aspect ratio differs (e.g. 4:3 vs 16:9)
+        print(f"WARNING: {path} was made at {sw}x{sh} but the camera gives {w}x{h} - "
+              f"a different camera or mode. Ignoring it (using the datasheet focal length).")
+        return None, None
+    s = w / sw
+    K = K.copy()
+    K[0, 0] *= s
+    K[1, 1] *= s
+    K[:2, 2] = (K[:2, 2] + 0.5) * s - 0.5        # pixel centres (same rule as cv2.resize)
+    print(f"Note: {path} made at {sw}x{sh}, rescaled to {w}x{h}.")
+    return K, dist
 
 
 def to_north_east(shift_px, height_m, focal_px, yaw_rad):
@@ -106,9 +159,13 @@ def to_north_east(shift_px, height_m, focal_px, yaw_rad):
 
 
 class GroundTracker:
-    def __init__(self, K=None, dist=None):
+    def __init__(self, K=None, dist=None, point_filter=None):
         self.K = K
         self.dist = dist
+        # Feature filter (vision/feature_filter.py): keeps home corners off the drone's own
+        # props/arms, burned-in OSD text and glare. None = off = the tracker behaves exactly
+        # as before. vision_hold.py switches it on with feature_filter.attach(tracker, health).
+        self.point_filter = point_filter
         self.ref_gray = None     # the HOME image
         self.ref_pts = None      # Harris corners in the home image, shape (N,1,2)
         self.ref_und = None      # same corners with lens distortion removed
@@ -120,6 +177,10 @@ class GroundTracker:
         h, w = gray.shape
         mask = np.zeros_like(gray)
         mask[BORDER:h - BORDER, BORDER:w - BORDER] = 255   # skip the edges
+        if self.point_filter is not None:                  # skip props / arms / OSD text too
+            static = self.point_filter.mask_for(gray.shape)
+            if static is not None:
+                mask = cv2.bitwise_and(mask, static)
 
         # Ask for LOTS of Harris corners (strongest first)...
         corners = cv2.goodFeaturesToTrack(
@@ -128,6 +189,10 @@ class GroundTracker:
             useHarrisDetector=True, k=HARRIS_K)
         if corners is None:
             return np.empty((0, 1, 2), np.float32)
+        if self.point_filter is not None:                  # drop corners on glare
+            corners = corners[self.point_filter.keep(gray, corners.reshape(-1, 2))]
+            if len(corners) == 0:
+                return np.empty((0, 1, 2), np.float32)
 
         # ...then keep only the best few in each grid cell, so they cover the image.
         per_cell = max(1, MAX_CORNERS // (GRID[0] * GRID[1]))
@@ -155,8 +220,9 @@ class GroundTracker:
     # ---------- Save HOME ----------
     def set_reference(self, gray):
         h, w = gray.shape
-        if self.K is None:   # no calibration: fall back to a rough guess
-            self.K = np.array([[DEFAULT_FOCAL_PX, 0, w / 2], [0, DEFAULT_FOCAL_PX, h / 2], [0, 0, 1]])
+        if self.K is None:   # no calibration: datasheet focal length for THIS image width
+            f = focal_from_fov(w)
+            self.K = np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1]])
         self.centre = (self.K[0, 2], self.K[1, 2])   # calibrated centre, not w/2, h/2
         self.ref_gray = gray.copy()
         self.ref_pts = self._detect_harris(gray)
@@ -241,8 +307,8 @@ class GroundTracker:
 def main():
     from health.health import HealthChecker   # imported here so tracker.py works on its own too
 
-    source = sys.argv[1] if len(sys.argv) > 1 else 0
-    cap = cv2.VideoCapture(source)
+    source = sys.argv[1] if len(sys.argv) > 1 else "0"
+    cap = cv2.VideoCapture(int(source) if source.isdigit() else source)   # "2" = camera 2, not a file
     K, dist = load_calibration()
     tracker = GroundTracker(K, dist)
     health = HealthChecker()

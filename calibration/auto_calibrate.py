@@ -7,9 +7,16 @@
 #
 # How to run:
 #   python -m calibration.auto_calibrate               -> camera 0
-#   python -m calibration.auto_calibrate 1             -> camera 1 (e.g. the drone camera)
+#   python -m calibration.auto_calibrate 2             -> camera 2
+#   python -m calibration.auto_calibrate /dev/video2   -> the Justice D on the APB (CSI1)
 #   python -m calibration.auto_calibrate video.mp4     -> a video you recorded of the board
 #   add  --no-window  on a computer without a screen (e.g. the drone)
+#   add  --square 0.031  to give the measured square size (metres) without editing the file
+#
+# Justice D: 1280x720, 114 deg wide. Calibrate at the camera's FULL size (vision_hold.py
+# scales K down to the 640x360 it tracks at). If the normal lens model fits badly (wide
+# lenses bend a lot near the edges), it automatically tries OpenCV's rational model
+# (8 distortion numbers) and keeps whichever fits better; tracker.py needs no change.
 #
 # What YOU do: slowly move the checkerboard (or the camera) around:
 #   near and far, tilted left/right/up/down, and into every corner of the picture.
@@ -33,7 +40,8 @@ import numpy as np
 # ---------------- Settings (check these match YOUR checkerboard!) ----------------
 BOARD = (8, 5)           # INNER corners of the checkerboard (columns, rows)
 SQUARE_M = 0.025         # size of one square in metres (2.5 cm). Measure yours!
-WIDTH, HEIGHT = 640, 480 # resolution to calibrate at = the resolution you will FLY with
+WIDTH, HEIGHT = 1280, 720  # Justice D's fixed output; asked for on webcams (the Justice D ignores it)
+TRY_WIDE_MODEL_ABOVE_PX = 0.5   # normal-model error above this -> also try the rational model
 TARGET_VIEWS = 20        # stop automatically after this many snapshots
 MIN_VIEWS = 10           # fewest snapshots that still give a usable result
 MAX_SECONDS = 300        # give up waiting after 5 minutes (uses what it has)
@@ -99,21 +107,38 @@ def missing_areas(saved_views):
     return [names[r][c] for r in range(3) for c in range(3) if (r, c) not in seen]
 
 
+def fit_lens(board_pts, image_pts, image_size):
+    """Fit the normal lens model; if it fits badly (wide lens), also try the rational
+    model and keep the better one. Returns (error_px, K, dist, model name)."""
+    error, K, dist, _, _ = cv2.calibrateCamera(board_pts, image_pts, image_size, None, None)
+    if error <= TRY_WIDE_MODEL_ABOVE_PX:
+        return error, K, dist, "normal"
+    e2, K2, d2, _, _ = cv2.calibrateCamera(board_pts, image_pts, image_size, None, None,
+                                           flags=cv2.CALIB_RATIONAL_MODEL)
+    print(f"Normal lens model: {error:.3f} px, rational (wide-angle) model: {e2:.3f} px")
+    if e2 < error:
+        return e2, K2, d2, "rational"
+    return error, K, dist, "normal"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Automatic camera calibration")
-    parser.add_argument("source", nargs="?", default="0", help="camera number or video file")
+    parser.add_argument("source", nargs="?", default="0",
+                        help="camera number, /dev/videoN, or video file")
     parser.add_argument("--no-window", action="store_true", help="don't open a preview window")
+    parser.add_argument("--square", type=float, default=SQUARE_M,
+                        help="measured size of one square in metres (default %(default)s)")
     args = parser.parse_args()
 
-    is_camera = args.source.isdigit()
-    cap = cv2.VideoCapture(int(args.source) if is_camera else args.source)
-    if is_camera:   # ask the camera for the flying resolution
+    is_camera = args.source.isdigit() or args.source.startswith("/dev/video")
+    cap = cv2.VideoCapture(int(args.source) if args.source.isdigit() else args.source)
+    if is_camera:   # ask the camera for the flying resolution (fixed-mode cameras ignore it)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
 
     # The real-world 3D corner positions of a flat board (z = 0)
     board_points = np.zeros((BOARD[0] * BOARD[1], 3), np.float32)
-    board_points[:, :2] = np.mgrid[0:BOARD[0], 0:BOARD[1]].T.reshape(-1, 2) * SQUARE_M
+    board_points[:, :2] = np.mgrid[0:BOARD[0], 0:BOARD[1]].T.reshape(-1, 2) * args.square
 
     all_board_points, all_image_points, saved_views = [], [], []
     prev_corners, last_snap, image_size = None, 0.0, None
@@ -175,9 +200,11 @@ def main():
     if n < MIN_VIEWS:
         print(f"Only {n} snapshots (need {MIN_VIEWS}). Move the board around more and run again.")
         return
-    error, K, dist, _, _ = cv2.calibrateCamera(all_board_points, all_image_points,
-                                               image_size, None, None)
-    print(f"\nUsed {n} snapshots at {image_size[0]}x{image_size[1]}.")
+    error, K, dist, model = fit_lens(all_board_points, all_image_points, image_size)
+    print(f"\nUsed {n} snapshots at {image_size[0]}x{image_size[1]} ({model} lens model).")
+    if image_size != (WIDTH, HEIGHT):
+        print(f"Note: the camera gave {image_size[0]}x{image_size[1]}, not {WIDTH}x{HEIGHT}. "
+              f"Fine for a webcam test; on the drone it must be the Justice D's full size.")
     print(f"Average error: {error:.3f} px (below 0.5 = great, below {GOOD_ERROR_PX} = fine)")
     print(f"Focal length: {K[0, 0]:.1f} x {K[1, 1]:.1f} px,  centre: ({K[0, 2]:.1f}, {K[1, 2]:.1f})")
     if error < GOOD_ERROR_PX:

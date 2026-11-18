@@ -5,6 +5,7 @@
 # taped flat on a book or cardboard.
 #
 # How to run (from the repo root, so calib.npz lands there):  python -m calibration.calibrate
+#   python -m calibration.calibrate 2            -> camera 2 (or /dev/video2, or a video file)
 # Keys:  c = capture this view (do ~15 from different angles/distances)
 #        q = finish and calculate
 
@@ -17,6 +18,8 @@
 #   - Zhang, "A Flexible New Technique for Camera Calibration", IEEE TPAMI 2000.
 #   - OpenCV tutorial: https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html
 # -------------------------------------------------------------------------------------
+
+import sys
 
 import cv2
 import numpy as np
@@ -31,7 +34,8 @@ board_points[:, :2] = np.mgrid[0:BOARD[0], 0:BOARD[1]].T.reshape(-1, 2) * SQUARE
 all_board_points = []   # 3D points, one set per captured photo
 all_image_points = []   # where those corners appeared in each photo (pixels)
 
-cap = cv2.VideoCapture(0)
+source = sys.argv[1] if len(sys.argv) > 1 else "0"
+cap = cv2.VideoCapture(int(source) if source.isdigit() else source)
 image_size = None
 
 while True:
@@ -73,5 +77,7 @@ else:
     print("Average error (pixels, smaller is better, aim < 1):", round(error, 3))
     print("Camera matrix K:\n", K)
     print("Distortion:", dist.ravel())
-    np.savez("calib.npz", K=K, dist=dist)
-    print("Saved to calib.npz")
+    # Save the image size too: vision_hold.py / tracker.load_calibration use it to scale K
+    # to the size we track at, and to refuse a lens file from a different camera.
+    np.savez("calib.npz", K=K, dist=dist, size=np.array(image_size))
+    print(f"Saved to calib.npz ({image_size[0]}x{image_size[1]})")
