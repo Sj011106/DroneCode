@@ -207,6 +207,7 @@ def main(argv=None):                                             # NEW: argv for
     home_saved, home_pending, reset_counter, last_texture_warn = False, False, 0, 0.0
     reanchor_request = False                                 # Part D: set by handover, recorded like a trigger
     last_cam_warn = 0.0                                      # Part D: camera-dead warning at most every 5 s
+    last_hb_warn = 0.0                                       # Part D: no-heartbeat warning at most every 5 s
     want_source, last_source_try = None, 0.0
     last_heartbeat, last_origin_try, last_frame_ok = 0.0, 0.0, time.time()
     prev_ne, vel_ned = None, np.zeros(3)
@@ -240,16 +241,18 @@ def main(argv=None):                                             # NEW: argv for
                     elif action[0] == "GAVE_UP":
                         msg = f"FAILSAFE: autopilot ignored {link.conn.flightmode} after {handover.max_sends} tries - PILOT MUST TAKE OVER"
                         print(msg)
-                        link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, msg[:50].encode())
+                        with link.send_lock:
+                            link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, msg[:50].encode())
                     else:
                         print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
-                        link.conn.set_mode(action[1])
+                        with link.send_lock:
+                            link.conn.set_mode(action[1])
             if not ok:
                 if not is_camera:
                     print("Video finished.")
                     break
                 if t_capture - last_frame_ok > 5.0 and t_capture - last_cam_warn >= 5.0:
-                    print("Camera lost for 5 s - still running on the last data; check the camera.")
+                    print("Camera lost - sending no-position to autopilot; check the camera.")
                     last_cam_warn = t_capture
                 if home_saved:                                   # tell the autopilot: no data
                     att = link.attitude_at(t_capture) or (0.0, 0.0, 0.0)
@@ -373,17 +376,23 @@ def main(argv=None):                                             # NEW: argv for
                 last_source_try = now
 
             # Part D: pilot handover. Only acts while the pilot has selected a hold mode.
+            age = link.mode_age()
+            if link.conn.flightmode in HOLD_MODES and age > 3.0 and now - last_hb_warn >= 5.0:
+                print(f"WARNING: no fresh autopilot heartbeat for {age:.1f} s - failsafe cannot act")
+                last_hb_warn = now
             for action in handover.update(now, link.conn.flightmode, quality,
-                                          mode_fresh=link.mode_age() < 1.5):
+                                          mode_fresh=age < 1.5):
                 if action == REANCHOR:
                     reanchor_request = True                      # next frame saves home + bumps reset_counter
                 elif action[0] == "GAVE_UP":
                     msg = f"FAILSAFE: autopilot ignored {link.conn.flightmode} after {handover.max_sends} tries - PILOT MUST TAKE OVER"
                     print(msg)
-                    link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, msg[:50].encode())
+                    with link.send_lock:
+                        link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, msg[:50].encode())
                 else:
                     print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
-                    link.conn.set_mode(action[1])
+                    with link.send_lock:
+                        link.conn.set_mode(action[1])
 
             prof.end_frame()                                     # NEW
             ms = prof.current

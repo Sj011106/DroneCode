@@ -131,8 +131,8 @@ class DroneLink:
                 self.rc = {i: getattr(msg, f"chan{i}_raw") for i in range(1, 17)}
             elif kind == "HEARTBEAT":
                 if (msg.get_srcSystem() == self.conn.target_system
-                        and msg.get_srcComponent() == self.conn.target_component
-                        and msg.type != mavutil.mavlink.MAV_TYPE_GCS):
+                        and msg.type != mavutil.mavlink.MAV_TYPE_GCS
+                        and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID):
                     self.mode_time = time.monotonic()      # only the autopilot's heartbeat
             elif kind == "GPS_GLOBAL_ORIGIN":
                 self.origin_set = True
