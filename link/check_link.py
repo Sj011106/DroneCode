@@ -17,7 +17,7 @@
 #
 # HOW TO RUN (from the repo root)
 #   python -m link.check_link                          # simulator
-#   python -m link.check_link --connect /dev/ttyAMA0   # real drone (serial)
+#   python -m link.check_link --connect /dev/ttymxc2   # real drone (serial)
 #
 # REFERENCES
 #   - MAVLink message interval: https://mavlink.io/en/mavgen_python/howto_requestmessages.html
