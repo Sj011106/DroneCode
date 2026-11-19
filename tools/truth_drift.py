@@ -187,6 +187,8 @@ def main():
     print(f"Hold start: {t0:.1f} s" if t0 is not None else "Hold start: first GPS sample")
     rows, series = drift_report(tr["truth"], tr["alt"], tr.get("vision"), tr.get("ekf"), t0, args.end)
     print_report(rows)
+    from tools.hold_score import print_band_verdicts            # NEW (Ayush A3): PASS/FAIL per band
+    print_band_verdicts(series)                                  # (PLACEHOLDER limits until Stage 2)
 
     import matplotlib
     matplotlib.use("Agg")
