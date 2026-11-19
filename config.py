@@ -98,3 +98,12 @@ TRIAL_MODE = True            # True = GPS can NEVER take over: vision_hold sets 
                              # `vision_hold.py --practice` turns it off (loud banner). The rules: GNSS must
                              # not aid the scored hold (Grand Final package Stage 1 Rev 1.3, p.2, p.7 Q14).
                              # preflight.py says NO-GO if this is False. Keep it True.
+
+# ---------------- Pre-flight GO / NO-GO (Ayush, task A2: preflight.py) ----------------
+PREFLIGHT_STRICT = False     # True = every WARN counts as NO-GO (set True, or pass --strict, for the trial)
+PREFLIGHT_CAMERA_SIZE = (1280, 720)   # Justice D datasheet; APB manual p.12: fixed 1280x720 @ 60 fps
+PREFLIGHT_MIN_FPS = 50       # 60 fps nominal: below 50 measured -> WARN
+PREFLIGHT_TEMP_WARN_C = 75   # the fan holds ~62 C, the board shuts itself down at 95 C (APB manual p.11)
+PREFLIGHT_TEMP_NOGO_C = 85   # our choice: 10 C of margin below the 95 C shutdown
+PREFLIGHT_SD_PATH = "/sdcard"   # APB manual p.11
+PREFLIGHT_SD_WARN_MB = 2000  # ~8 min of lossless recording (RECORD_CODEC above: ~250 MB/min worst case)
