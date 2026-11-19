@@ -132,3 +132,19 @@ CEILING_TILT_SIGMA_DEG = 0.5 # leftover roll/pitch error after tilt cancel, per 
 CEILING_MARGIN = 1.5         # vision may use only 1/1.5 of each limit (the rest: wind, controller)
 CEILING_CLIMB_STEPS_M = (10, 20, 40, 60, 80, 100)   # climb ladder, docs/WORKLIST.md task 3.8
 CEILING_WINDOW = 30          # median over this many trusted frames (1 s at 30 fps)
+
+# ---------------- GNSS integrity monitor (Ayush, task A5: safety/gnss_monitor.py) ----------------
+# WATCH ONLY: flags JAMMED / SPOOF SUSPECTED from MAVLink GPS_RAW_INT. Never used to navigate.
+# The thresholds are our choices (not in the PDFs); tune them from practice-flight logs.
+GNSS_MONITOR = True          # on/off (log: logs/flight_<time>_safety.csv)
+GNSS_REQUEST_HZ = 5          # ask the autopilot to stream GPS_RAW_INT this often (0 = don't ask)
+GNSS_MIN_SATS = 6            # fewer satellites -> JAMMED (degraded)
+GNSS_MAX_HDOP = 2.5          # worse horizontal dilution of precision -> JAMMED (degraded)
+GNSS_TIMEOUT_S = 2.0         # no new GPS report for this long (after we had some) -> JAMMED
+GNSS_JUMP_MIN_M = 20.0       # a GPS jump bigger than this ...
+GNSS_JUMP_SPEED_MPS = 25.0   # ... and faster than this (90 km/h; no hovering drone does it) -> SPOOF SUSPECTED
+GNSS_DISAGREE_M = 10.0       # GPS vs vision displacement differ by more than max(this, 4 x GPS accuracy) ...
+GNSS_DISAGREE_S = 3.0        # ... for this long while vision is trusted -> SPOOF SUSPECTED
+                             # (5 m / 2 s gave 3 false alarms in 10 min of honest, wandering GPS: measured)
+GNSS_ANCHOR_S = 5.0          # GPS reference point = median of the first 5 s of fixes after home is saved
+GNSS_ALARM_HOLD_S = 10.0     # keep showing SPOOF SUSPECTED this long after the last evidence
