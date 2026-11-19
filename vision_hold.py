@@ -173,6 +173,9 @@ def main(argv=None):                                             # NEW: argv for
     tracker = RollingShutterTracker(K, dist, attitude_history=link.attitudes, timing=timing,
                                     enabled=config.USE_ROLLING_SHUTTER)   # NEW: explicit, so --set works
     health = HealthChecker()
+    if getattr(config, "USE_FEATURE_FILTER", False):             # Saumya: ignore props/OSD (mask.png)
+        from vision.feature_filter import attach
+        attach(tracker, health)
     imu_check, height_filter = ImuCheck(), HeightFilter()        # NEW
     recovery, failsafe = Recovery(tracker), Failsafe()           # NEW
     rehome = Rehome()                                            # NEW: new reference while climbing
@@ -242,6 +245,9 @@ def main(argv=None):                                             # NEW: argv for
             gray = enhance(small)                                # NEW: enhance() = contrast boost
             if not k_scaled:                                     # NEW: lens K for the processed size
                 orig_w = (replay.orig_width if replay else None) or frame.shape[1]
+                orig_h = round(frame.shape[0] * orig_w / frame.shape[1])
+                K, dist = load_calibration(config.CALIB_FILE, image_size=(orig_w, orig_h))   # size check
+                tracker.dist = dist
                 tracker.K = scale_camera_matrix(K, small.shape[1] / orig_w)
                 k_scaled = True
             t_frame = timing.mid_time(t_capture)                 # NEW: real capture time (= t_capture until calibrated)

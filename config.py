@@ -18,6 +18,7 @@ USE_TILT = True              # fusion/tilt.py: remove fake motion caused by roll
 USE_IMU_CHECK = True         # fusion/imu_check.py: reject frames where vision and IMU disagree
 USE_HEIGHT_FILTER = True     # fusion/height.py: smooth height, ignore spikes
 USE_RECOVERY = True          # recovery/recovery.py: re-find home after LOST
+USE_FEATURE_FILTER = True    # vision/feature_filter.py: ignore props/OSD text (needs mask.png)
 USE_REHOME = True            # vision/rehome.py: new reference picture while climbing/descending
 USE_CLAHE = True             # vision/enhance.py: local contrast boost (high / hazy / flat light)
 
