@@ -100,14 +100,17 @@ expect(pf.check_timing(os.path.join(tmp, "late.npz")), pf.WARN, "offset")
 
 
 class FakeCam:
+    """A camera with its own clock: each read() advances it by 1/fps (no real sleeping, so a busy
+    computer can't change the measured frame rate)."""
     def __init__(self, opened=True, size=(1280, 720), fps=60.0, picture=True):
         self.opened, self.size, self.dt, self.picture = opened, size, 1.0 / fps, picture
+        self.t = 0.0
 
     def isOpened(self):
         return self.opened
 
     def read(self):
-        time.sleep(self.dt)
+        self.t += self.dt
         if not self.picture:
             return False, None
         return True, np.zeros((self.size[1], self.size[0], 3), np.uint8)
@@ -116,12 +119,19 @@ class FakeCam:
         pass
 
 
-print("7. camera (real frame timing, fake camera)")
-expect(pf.check_camera("2", lambda s: FakeCam()), pf.GO, "1280x720")
-expect(pf.check_camera("2", lambda s: FakeCam(size=(640, 480))), pf.NOGO, "640x480")
-expect(pf.check_camera("2", lambda s: FakeCam(fps=30)), pf.WARN, "fps")
-expect(pf.check_camera("2", lambda s: FakeCam(opened=False)), pf.NOGO, "can't open")
-expect(pf.check_camera("2", lambda s: FakeCam(picture=False)), pf.NOGO, "no picture")
+print("7. camera (fake camera with its own clock)")
+
+
+def cam_check(**kw):
+    cam = FakeCam(**kw)
+    return pf.check_camera("2", lambda s: cam, clock=lambda: cam.t)
+
+
+expect(cam_check(), pf.GO, "1280x720 at 60 fps")
+expect(cam_check(size=(640, 480)), pf.NOGO, "640x480")
+expect(cam_check(fps=30), pf.WARN, "30 fps")
+expect(cam_check(opened=False), pf.NOGO, "can't open")
+expect(cam_check(picture=False), pf.NOGO, "no picture")
 
 print("8. autopilot link (link/check_link.py as a subprocess)")
 Run = namedtuple("Run", "returncode stdout stderr")
