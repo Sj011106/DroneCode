@@ -122,3 +122,13 @@ HOLD_RMS_DRIFT_M = 0.5       # PLACEHOLDER: RMS distance from the engage point (
 HOLD_RADIUS_M = 1.0          # PLACEHOLDER: radius for the "time inside" rule (m)
 HOLD_MIN_INSIDE_PCT = 95.0   # PLACEHOLDER: % of the hold inside HOLD_RADIUS_M
 HOLD_MAX_SPREAD_M = None     # "stability" as wobble around the average position (m); None = not judged
+
+# ---------------- Altitude Ceiling Advisor (Ayush, task A4: safety/ceiling.py) ----------------
+# Watches only: predicts our position error from height, focal length and quality, and warns
+# before a climb step that would fail the HOLD_* limits above. Never changes what is sent.
+CEILING_ADVISOR = True       # on/off (log: logs/flight_<time>_safety.csv)
+CEILING_TILT_SIGMA_DEG = 0.5 # leftover roll/pitch error after tilt cancel, per axis. SIMULATED: ArduCopter
+                             # SITL EKF attitude vs truth (roll 0.62-0.69, pitch 0.25 deg). Measure in flight!
+CEILING_MARGIN = 1.5         # vision may use only 1/1.5 of each limit (the rest: wind, controller)
+CEILING_CLIMB_STEPS_M = (10, 20, 40, 60, 80, 100)   # climb ladder, docs/WORKLIST.md task 3.8
+CEILING_WINDOW = 30          # median over this many trusted frames (1 s at 30 fps)
