@@ -67,6 +67,7 @@ from vision.rehome import Rehome
 from vision.rolling_shutter import RollingShutterTracker, attitude_near
 from vision.timing import load_timing
 from safety import trial_mode                                    # NEW (Ayush A1): GPS can't take over
+from safety.side_monitors import SideMonitors                    # NEW (Ayush A4/A5): watch-only advisors
 
 # ---------------- Settings ----------------
 CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttyAMA0" or "COM5"
@@ -214,6 +215,7 @@ def main(argv=None):                                             # NEW: argv for
     started, next_frame = time.time(), time.time()
     k_scaled, imu_bad_streak = False, 0                          # NEW
     print(f"Running. Home trigger = '{args.trigger}'. Logging to {log_path}. Ctrl+C to stop.")
+    monitors = SideMonitors(link, log_path)                      # NEW (Ayush A4/A5): never steers
 
     try:
         while args.max_seconds is None or time.time() - started < args.max_seconds:
@@ -355,6 +357,9 @@ def main(argv=None):                                             # NEW: argv for
                                ned_to_body(vel_ned, *att), quality, reset_counter,
                                metres_per_px=height / tracker.focal_px if quality > 0 else None)   # NEW
             prof.lap("send")                                     # NEW
+            monitors.frame(t_capture, height, tracker.focal_px, quality, north, east,   # NEW (Ayush A4/A5):
+                           rep.status, reset_counter)            # after the send; can't change it
+            prof.lap("safety")                                   # NEW (Ayush): its cost per frame
 
             # ---------- 5. Source switching (replaces 'v' and 'g') ----------
             if rep.status == "OK" and quality > 0:
@@ -414,6 +419,7 @@ def main(argv=None):                                             # NEW: argv for
         if prof.frames:                                          # NEW: compute summary for the slide
             print(f"\n{prof.table()}\nRe-locks: {recovery.relocks}, stale frames dropped: {budget.dropped}")
         print(trial.summary())                                   # NEW (Ayush A1)
+        monitors.close()                                         # NEW (Ayush A4/A5)
         print(f"Done. Log saved to {log_path}")
 
 
