@@ -24,7 +24,7 @@ Page numbers refer to the printed pages of each manual.
 
 | Fact | Value | Source |
 |---|---|---|
-| Sensor | Sony 1/2.8" CMOS, **rolling shutter** (as used by the challenge) | datasheet, package Q3 |
+| Sensor | Sony 1/2.8" CMOS, **rolling shutter** (as used by the challenge) | datasheet (sensor); package p.5 Q3 (rolling shutter: the datasheet does not say) |
 | Resolution / rate | **1280 × 720 @ 60 fps**, 16:9 | datasheet |
 | Field of view | **114° horizontal, 86° vertical**, 121.5° diagonal (very wide lens) | datasheet |
 | Output | MIPI CSI, digital | datasheet |
@@ -108,6 +108,29 @@ What this means:
 - IMU / attitude rates delivered, timestamp conventions, camera–IMU timing information (package Q4).
 - Rangefinder supplied? Drift and stability thresholds, altitude levels, how altitude is measured.
 - What does the pilot's "engage" switch do exactly (which channel, which mode)?
+
+Added by Ayush (18 Nov) after re-reading all six PDFs (full list of differences: `docs/spec_delta.md`):
+
+1. **Hold thresholds:** what exactly is measured (largest distance from the engage point, RMS drift, or time
+   inside a radius)? What counts as "stable"? Minimum hold time? Which instrument measures it, and is altitude
+   above take-off or above ground? (Until then `config.HOLD_*` are PLACEHOLDERS, `tools/hold_score.py`.)
+2. **Engage switch:** which switch on the pilots' Tac.Ctrl, which channel and PWM, and what must it do in
+   ArduPilot (flight-mode change to LOITER, or an auxiliary function)? What should disengaging do?
+3. **Channel map in the issued ArduPilot build:** the MRM2-10AI manual (p.13) puts Arm/Disarm on CH5 and the
+   mode switch on CH9, but ArduPilot reads flight modes from CH5 by default. Will the build set `FLTMODE_CH` = 9
+   and arming on CH5 (`RC5_OPTION` = 153)? May teams change these?
+4. **Second pilot input:** may we use the unassigned left button (CH7, manual p.13) to save the hold point, or
+   must the single engage switch do everything?
+5. **GNSS during the scored hold:** will GPS reports (MAVLink GPS_RAW_INT) still reach the APB? Will the receiver
+   be switched off in firmware, jammed, or spoofed?
+6. **Justice D image:** is the OSD (voltage, name, timer) burned into the frames on /dev/video2? Can the automatic
+   day/night switch and the AI noise reduction be fixed off? What is the rolling-shutter readout time?
+7. **Justice D mount:** at what angle from straight down is it fixed (the manual, p.11, says the mount adjusts
+   0–30°), and which way is the top of the image relative to the nose?
+8. **Failsafe:** if our software loses vision during the scored hold, may it command LAND, or must it hand back to
+   the pilot (ALT_HOLD)?
+9. **Weather:** the highest wind at which scored holds are flown?
+10. **Logistics:** will SD cards be provided (FAT32 limits one file to 4 GB), and is network time (NTP) available?
 
 ## 7. Offline install (if the APB has no internet)
 

@@ -173,7 +173,9 @@ ArduPilot version, and the exact drift thresholds.
 - **Time:** 2 h.
 
 ### 1.9 Automatic tests on every push (GitHub Actions)
-- [ ] **Owner:** Claude (after 1.1)
+- [x] **Owner:** Ayush (task A6) → **DONE, waiting for the first push.** `.github/workflows/tests.yml` runs
+  `python -m tests.run_all` on Python 3.10 and 3.12 for every push and pull request. Rehearsed in clean
+  environments: 21/21 test files pass on both. One command locally too: `python -m tests.run_all` (`--fast` ~1 min).
 - **Why:** With 4 people pushing, something will break. GitHub runs all tests on every push and shows a
   green tick or red cross.
 - **Done when:** a green tick appears on GitHub.
@@ -215,7 +217,10 @@ ArduPilot version, and the exact drift thresholds.
 - **Time:** 2–3 h.
 
 ### 2.2 Encode the official thresholds
-- [ ] **Owner:** ______
+- [ ] **Owner:** Ayush (task A3) → **machinery DONE, numbers WAITING for Stage 2.** No PDF has them (package p.2,
+  p.3, p.8). `config.HOLD_*` hold clearly marked PLACEHOLDERS; `tools/analyze_log.py` (vision estimate, labelled)
+  and `tools/truth_drift.py` (GPS referee, per altitude band) print PASS/FAIL. **When Stage 2 lands:** copy each
+  number into `config.HOLD_*`, write the page into `HOLD_LIMITS_SOURCE`, set `HOLD_LIMITS_OFFICIAL = True`.
 - **Why:** We need an instant PASS/FAIL after every practice flight, using the judges' own numbers.
 - **Steps:** add the spec's drift and stability limits to `config.py` and a PASS/FAIL summary line to
   `tools/analyze_log.py` (ask Claude if needed).
@@ -313,7 +318,8 @@ ArduPilot version, and the exact drift thresholds.
      then LOITER for 60 s. GPS stays on in practice so we have the truth to compare against.
   2. Operator on the APB:
      `venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger rc --record`
-     (practice: GPS fallback on is acceptable; in the trial always add `--no-gps-fallback`).
+     (trial mode is the default since task A1: GPS can't take over. GPS as a referee needs no flag, ArduPilot
+     logs it anyway. Only `--practice` allows the old GPS fallback, with a loud banner. Never in the trial.)
   3. Pilot flips channel 7 → "HOME saved" → wait for status OK and source = vision → pilot switches to LOITER.
   4. Land. Copy `logs/`, the recording (`/sdcard/rec_*` or `logs/rec_*`) and the ArduPilot log (`.bin`) to the laptop.
   5. `python -m tools.analyze_log` and `python -m tools.truth_drift <log>.BIN` → our REAL drift vs GPS.
@@ -338,6 +344,9 @@ ArduPilot version, and the exact drift thresholds.
   `python -m tools.truth_drift <log>.BIN` for the **real** drift (GPS as referee; `analyze_log` only shows what
   vision believes) and `analyze_log` for % time OK. Write each result in the table below.
   **Stop at the first height that fails the official thresholds.**
+  **Auto-fill (Ayush, A3):** `python -m tools.hold_score <log>.BIN --flight logs/flight_<time>.csv --surface "dry grass"`
+  prints the PASS/FAIL and the finished row for this table. During the flight, the Ceiling Advisor (A4) prints
+  "predicted max safe height here" and warns before a step it predicts will fail (`logs/flight_<time>_safety.csv`).
 
   | Height | Surface | % time OK | RMS drift | Max drift | PASS/FAIL | Notes |
   |---|---|---|---|---|---|---|
@@ -375,7 +384,8 @@ ArduPilot version, and the exact drift thresholds.
 
 ### 4.2 Trial sequence (print this)
 1. On the APB: `systemctl stop vision_hold` (if it's enabled), then
-   `venv/bin/python -m link.check_link --connect /dev/ttymxc2` → **PASS**.
+   `venv/bin/python preflight.py --strict` → **VERDICT: GO** (it runs `link.check_link` too, plus trial mode,
+   calibration, timing, camera, temperature, SD card, busy devices and the GPS-switch parameters). Any NO-GO: do not fly.
 2. Start the program:
    `venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger rc --no-gps-fallback --record`
    (or, if the boot service is enabled for the trial: `systemctl start vision_hold`, then
@@ -409,6 +419,28 @@ ArduPilot version, and the exact drift thresholds.
 
 ---
 
+## Ayush's tasks (A1–A6, 18 Nov) and what they leave for others
+
+| Task | Status | Files | Evidence |
+|---|---|---|---|
+| A1 Trial safety lock | ✅ done (sim) | `safety/trial_mode.py`, 5 lines in `vision_hold.py`, `config.TRIAL_MODE` | `tests/test_trial_mode.py`: 0 GPS requests on the radio in trial mode (8 blocked), vision_hold end to end through a blackout + shutdown: GPS requested 0 times (practice: 2) |
+| A2 Pre-flight GO / NO-GO | ✅ done (fakes) / 🟡 run on the APB | `preflight.py`, `config.PREFLIGHT_*` | `tests/test_preflight.py`: 39 checks; the repo's webcam `calib.npz` is NO-GO |
+| A3 Thresholds → PASS/FAIL | 🟡 placeholders until Stage 2 | `tools/hold_score.py`, 2 lines each in `analyze_log` / `truth_drift`, `config.HOLD_*` | `tests/test_hold_score.py` |
+| A4 Altitude Ceiling Advisor | ✅ done (sim) | `safety/ceiling.py`, `safety/side_monitors.py`, `config.CEILING_*` | `tests/test_ceiling.py`: predicted vs measured error −12% to −20% at 5–80 m (tolerance ±25%); sent messages identical on/off; 0.1 ms/frame |
+| A5 GNSS integrity monitor | ✅ done (sim) / 🟡 needs GPS_RAW_INT at the event | `safety/gnss_monitor.py`, `config.GNSS_*` | `tests/test_gnss_monitor.py`: 0 false alarms in 10 min of honest GPS; teleport caught at once, 0.5 m/s drag in 23 s; sent messages identical on/off |
+| A6 CI | ✅ done, needs the first push | `.github/workflows/tests.yml`, `tests/run_all.py` | 21/21 on clean Python 3.10 and 3.12 |
+
+Left for others (found while doing A1–A6):
+- [ ] **Saumya:** `vision_hold.py` safe shutdown calls `cv2.destroyAllWindows()` even without `--show`. With an
+  OpenCV that has no window support (headless builds, possibly the APB), it raises and the rest of the shutdown
+  is skipped. Proposed one-line fix: only call it `if args.show`. Also the `/dev/ttyAMA0` comment on line 69 → `/dev/ttymxc2`.
+- [ ] **Divyanshi:** `ardupilot/vision_hold.param`: decide `FLTMODE_CH` (9 on the event radio) and arming
+  (`RC5_OPTION` 153) once question 3 in `docs/hardware.md` §6 is answered; delete `#RC8_OPTION,90` (payload
+  button); `/dev/ttyAMA0` → `/dev/ttymxc2` in the `.param` header and `link/check_link.py` comments.
+- [ ] **Whoever flies first:** measure the leftover tilt error (`config.CEILING_TILT_SIGMA_DEG`, now 0.5°
+  SIMULATED) and the real pixel noise (`ODOM_PX_NOISE_BEST`: the advisor's simulated prediction is ~15% optimistic).
+- [ ] **Everyone:** send `docs/hardware.md` §6 questions 1–10 (task 1.2).
+
 ## Where to find things
 
 | Need | Look in |
@@ -421,3 +453,6 @@ ArduPilot version, and the exact drift thresholds.
 | Slide → code → proof | `docs/presentation_notes.md` |
 | All settings and on/off switches | `config.py`, `ardupilot/vision_hold.param` |
 | What a file does | the header at the top of every `.py` file |
+| Pre-flight GO / NO-GO | `python preflight.py --strict` |
+| Every test, one command | `python -m tests.run_all` |
+| Our docs vs the organiser PDFs | `docs/spec_delta.md` |
