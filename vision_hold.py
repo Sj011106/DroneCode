@@ -410,6 +410,8 @@ def main(argv=None):                                             # NEW: argv for
             link.set_source(SRC_GPS)
             time.sleep(0.5)
         link.running = False
+        monitors.close()                                         # NEW (Ayush A4/A5): before anything that
+        print(trial.summary())                                   # NEW (Ayush A1)     can raise (see below)
         cap.release()
         log_file.close()
         if recorder:                                             # NEW
@@ -418,8 +420,6 @@ def main(argv=None):                                             # NEW: argv for
         cv2.destroyAllWindows()
         if prof.frames:                                          # NEW: compute summary for the slide
             print(f"\n{prof.table()}\nRe-locks: {recovery.relocks}, stale frames dropped: {budget.dropped}")
-        print(trial.summary())                                   # NEW (Ayush A1)
-        monitors.close()                                         # NEW (Ayush A4/A5)
         print(f"Done. Log saved to {log_path}")
 
 
