@@ -3,6 +3,8 @@
 #   'r' (save home)     -> saved by itself when the HOME TRIGGER fires (see HOME_TRIGGER)
 #   'v' (use vision)    -> switches by itself once health.py says tracking is trusted (OK)
 #   'g' (back to GPS)   -> switches back by itself if tracking is LOST (if a GPS is fitted)
+#                          NEW (Ayush A1): only with --practice. TRIAL MODE (the default) makes this
+#                          impossible: GNSS must not aid the scored hold (safety/trial_mode.py).
 #   'q' (quit)          -> Ctrl+C, the camera dying, or MAX_SECONDS: shuts down SAFELY
 #
 # Every frame:  camera -> tracker.py -> health.py -> ODOMETRY message -> autopilot
@@ -64,6 +66,7 @@ from vision.enhance import downscale, enhance, scale_camera_matrix
 from vision.rehome import Rehome
 from vision.rolling_shutter import RollingShutterTracker, attitude_near
 from vision.timing import load_timing
+from safety import trial_mode                                    # NEW (Ayush A1): GPS can't take over
 
 # ---------------- Settings ----------------
 CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttyAMA0" or "COM5"
@@ -127,6 +130,8 @@ def main(argv=None):                                             # NEW: argv for
     ap.add_argument("--fixed-height", type=float, default=None,
                     help="bench test only: pretend the camera is this many metres up")
     ap.add_argument("--no-gps-fallback", action="store_true")
+    ap.add_argument("--practice", action="store_true",           # NEW (Ayush A1)
+                    help="practice only: allow the GPS fallback (NEVER for the scored trial)")
     ap.add_argument("--show", action="store_true", help="show a preview window")
     ap.add_argument("--max-seconds", type=float, default=MAX_SECONDS)
     # NEW: record a flight, replay it through this same code, toggle settings for replays
@@ -143,11 +148,13 @@ def main(argv=None):                                             # NEW: argv for
             raise SystemExit(f"--set: config.py has no setting {name}")
         setattr(config, name, ast.literal_eval(value))
         print(f"config.{name} = {getattr(config, name)!r}")
+    trial = trial_mode.from_args(args)                           # NEW (Ayush A1): sets --no-gps-fallback
     signal.signal(signal.SIGTERM, _stop_on_sigterm)              # NEW: 'systemctl stop' -> safe shutdown
     replay = Replay(args.replay) if args.replay else None        # NEW
     clock = replay.clock if replay else time.time                # NEW: recorded time during replay
 
     link = replay.link if replay else DroneLink(args.connect)    # NEW: replay link
+    trial.guard(link)                                            # NEW (Ayush A1): drops any "use GPS" command
     link.start()
     link.check_params()
 
@@ -406,6 +413,7 @@ def main(argv=None):                                             # NEW: argv for
         cv2.destroyAllWindows()
         if prof.frames:                                          # NEW: compute summary for the slide
             print(f"\n{prof.table()}\nRe-locks: {recovery.relocks}, stale frames dropped: {budget.dropped}")
+        print(trial.summary())                                   # NEW (Ayush A1)
         print(f"Done. Log saved to {log_path}")
 
 
