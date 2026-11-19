@@ -107,3 +107,18 @@ PREFLIGHT_TEMP_WARN_C = 75   # the fan holds ~62 C, the board shuts itself down 
 PREFLIGHT_TEMP_NOGO_C = 85   # our choice: 10 C of margin below the 95 C shutdown
 PREFLIGHT_SD_PATH = "/sdcard"   # APB manual p.11
 PREFLIGHT_SD_WARN_MB = 2000  # ~8 min of lossless recording (RECORD_CODEC above: ~250 MB/min worst case)
+
+# ---------------- Hold limits -> PASS / FAIL (Ayush, task A3: tools/hold_score.py) ----------------
+# NOT IN THE PDFs YET. The Grand Final package (Stage 1 Rev 1.3) says Stage 2 will define "the approved
+# altitude levels, qualifying hold and measurement rules" (p.2; also p.3 and p.8). Every number below
+# is a PLACEHOLDER and is printed as such until HOLD_LIMITS_OFFICIAL = True. When Stage 2 arrives:
+# copy each number, write the page into HOLD_LIMITS_SOURCE, set a limit to None if it is not judged.
+USE_HOLD_SCORE = True        # print PASS/FAIL at the end of tools/analyze_log.py and tools/truth_drift.py
+HOLD_LIMITS_OFFICIAL = False # True ONLY when the numbers below are copied from the Stage 2 package
+HOLD_LIMITS_SOURCE = "Stage 2 package not published yet"
+HOLD_MIN_SECONDS = 30.0      # PLACEHOLDER: shortest hold that counts (seconds)
+HOLD_MAX_DRIFT_M = 1.0       # PLACEHOLDER: largest horizontal distance from the engage point (m)
+HOLD_RMS_DRIFT_M = 0.5       # PLACEHOLDER: RMS distance from the engage point (m)
+HOLD_RADIUS_M = 1.0          # PLACEHOLDER: radius for the "time inside" rule (m)
+HOLD_MIN_INSIDE_PCT = 95.0   # PLACEHOLDER: % of the hold inside HOLD_RADIUS_M
+HOLD_MAX_SPREAD_M = None     # "stability" as wobble around the average position (m); None = not judged
