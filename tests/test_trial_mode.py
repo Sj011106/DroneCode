@@ -10,7 +10,8 @@
 #           proves the test can see them.
 #   Test 3: the real vision_hold.py runs a recorded flight with a 1.5 s camera blackout
 #           (vision LOST) and then shuts down: the two places where Saumya's logic asks for
-#           GPS. Trial mode (the default): zero GPS requests. --practice: GPS is requested.
+#           GPS. Worst case FALLBACK_TO_GPS = True. Trial mode (the default): zero GPS
+#           requests. --practice: GPS is requested (proves both paths ran).
 #
 # Run (from the repo root):  python -m tests.test_trial_mode      (~20 s)
 # REFERENCES: safety/trial_mode.py
@@ -144,12 +145,14 @@ def recording_set_source(self, n):
 
 replay_mod.ReplayLink.set_source = recording_set_source
 DEFAULTS = {k: getattr(config, k) for k in dir(config) if k.isupper()}
+FALLBACK_AS_SHIPPED = vision_hold.FALLBACK_TO_GPS
 
 
 def run(*extra):
     for k, v in DEFAULTS.items():
         setattr(config, k, v)
-    requests.clear()
+    vision_hold.FALLBACK_TO_GPS = True     # worst case, whatever vision_hold.py ships with (main: True;
+    requests.clear()                       # Praise's handover branch: False). Trial mode must still block.
     log = os.path.join(tmp, "log.csv")
     vision_hold.main(["--replay", rec_dir, "--log", log, *extra])
     with open(log) as f:
@@ -168,5 +171,6 @@ assert SRC_VISION in req_trial, "trial mode must still switch the autopilot to v
 assert SRC_GPS not in req_trial, "trial mode must never ask for GPS"
 assert SRC_GPS in req_prac, "practice mode should ask for GPS (proves the paths were exercised)"
 replay_mod.ReplayLink.set_source = real_set_source
+vision_hold.FALLBACK_TO_GPS = FALLBACK_AS_SHIPPED
 
 print("\nALL TRIAL-MODE TESTS PASSED")
