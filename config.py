@@ -91,3 +91,10 @@ ODOM_PX_NOISE_WORST = 3.0    # quality 1
 # ---------------- Compute budget ----------------
 TARGET_FPS = 30              # processing rate we aim for; budget per frame = 1 / TARGET_FPS.
                              # (The camera runs at 60 fps; stale frames are dropped by frame age.)
+
+# ---------------- Trial safety lock (Ayush, task A1: safety/trial_mode.py) ----------------
+TRIAL_MODE = True            # True = GPS can NEVER take over: vision_hold sets --no-gps-fallback by itself
+                             # and a guard on the link drops every "use GPS" command. Only
+                             # `vision_hold.py --practice` turns it off (loud banner). The rules: GNSS must
+                             # not aid the scored hold (Grand Final package Stage 1 Rev 1.3, p.2, p.7 Q14).
+                             # preflight.py says NO-GO if this is False. Keep it True.
