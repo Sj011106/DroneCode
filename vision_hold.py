@@ -70,7 +70,7 @@ from safety import trial_mode                                    # NEW (Ayush A1
 from safety.side_monitors import SideMonitors                    # NEW (Ayush A4/A5): watch-only advisors
 
 # ---------------- Settings ----------------
-CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttyAMA0" or "COM5"
+CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttymxc2" or "COM5"
 
 HOME_TRIGGER = "mode"   # when to save HOME (replaces the 'r' key):
                         #  "mode"  = when the pilot switches into a mode in HOLD_MODES
@@ -417,7 +417,8 @@ def main(argv=None):                                             # NEW: argv for
         if recorder:                                             # NEW
             recorder.close()
             print(f"Recording saved in {rec_dir} ({recorder.n} frames)")
-        cv2.destroyAllWindows()
+        if args.show:                                            # PROPOSED (C6): no window was opened
+            cv2.destroyAllWindows()                              # without --show; headless OpenCV raises here
         if prof.frames:                                          # NEW: compute summary for the slide
             print(f"\n{prof.table()}\nRe-locks: {recovery.relocks}, stale frames dropped: {budget.dropped}")
         print(f"Done. Log saved to {log_path}")

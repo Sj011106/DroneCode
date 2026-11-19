@@ -12,7 +12,7 @@
 #     - to LAND if its own position estimate falls apart.
 #
 # HOW TO LOAD
-#   On the APB (no Mission Planner needed):  python -m ardupilot.load_params --connect /dev/ttyAMA0
+#   On the APB (no Mission Planner needed):  python -m ardupilot.load_params --connect /dev/ttymxc2
 #   Or Mission Planner: Config -> Full Parameter List -> Load from file -> Write Params.
 #   Then REBOOT the flight controller (several of these only apply after a reboot).
 #   Check any time:  python -m ardupilot.load_params --verify   (link/check_link.py does too)
@@ -108,7 +108,10 @@ RC7_OPTION,0             # RC channel 7 is OUR home trigger (vision_hold.py HOME
 #
 # Pilot override of the source set with a 3-position switch (optional; vision_hold.py
 # also switches by MAVLink, the last change wins):
-#RC8_OPTION,90           # 90 = EKF source set: low = 1 (GPS), middle = 2 (vision)
+# PROPOSED (C5): do NOT use CH8 for this at the event - CH8 is the payload button (MRM p.13),
+# and source set 1 = GPS is not allowed in the scored hold (package p.2). preflight.py says NO-GO
+# if any RCx_OPTION = 90.
+#RCx_OPTION,90           # 90 = EKF source set: low = 1 (GPS), middle = 2 (vision)
 #
 # Flight modes on the mode switch (pilot preference): 2 = ALT_HOLD, 5 = LOITER, 9 = LAND
 #FLTMODE1,2

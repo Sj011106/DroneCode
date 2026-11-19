@@ -26,7 +26,7 @@
 #
 # HOW TO RUN (from the repo root, drone connected, props OFF)
 #   python -m calibration.calibrate_timing --camera 1
-#   python -m calibration.calibrate_timing --camera 1 --connect /dev/ttyAMA0 --seconds 30
+#   python -m calibration.calibrate_timing --camera 1 --connect /dev/ttymxc2 --seconds 30
 #
 # REFERENCES
 #   - Karpenko, Jacobs, Baek, Levoy, "Digital Video Stabilization and Rolling Shutter
