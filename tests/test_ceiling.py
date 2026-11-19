@@ -23,6 +23,7 @@
 # =====================================================================================
 
 import contextlib
+import csv
 import io
 import math
 import os
@@ -156,6 +157,7 @@ def run(on):
     for k_, v in DEFAULTS.items():
         setattr(config, k_, v)
     config.CEILING_ADVISOR = on
+    config.GNSS_MONITOR = False              # isolate the advisor (A5's monitor has its own test)
     sent.clear()
     log = os.path.join(tmp, f"flight_{on}.csv")
     out = io.StringIO()
@@ -175,12 +177,12 @@ off_msgs, off_log, _ = run(False)
 in_flight = len(on_msgs) - 5            # the last 5 are the shutdown "no data" packets (wall-clock time)
 replay_mod._ReplayConn.odometry_send = real_send
 safety_csv = os.path.splitext(on_log)[0] + "_safety.csv"
-with open(safety_csv) as f:
-    rows = f.read().strip().splitlines()
+with open(safety_csv, newline="") as f:
+    rows = list(csv.DictReader(f))
 ms = [ln for ln in on_text.splitlines() if ln.startswith("| safety |")]
 print(f"  ODOMETRY messages: {len(on_msgs)} with advisor, {len(off_msgs)} without; the {in_flight} in-flight "
       f"messages identical: {same(on_msgs[:in_flight], off_msgs[:in_flight])}")
-print(f"  side log {os.path.basename(safety_csv)}: {len(rows) - 1} rows; last advice: {rows[-1].split(',')[-1]}")
+print(f"  side log {os.path.basename(safety_csv)}: {len(rows)} rows; last advice: {rows[-1]['ceil_advice']}")
 print(f"  cost per frame (profiler): {ms[0] if ms else 'n/a'}")
 assert in_flight > 50 and same(on_msgs[:in_flight], off_msgs[:in_flight]), \
     "the advisor must never change what is sent to ArduPilot"
