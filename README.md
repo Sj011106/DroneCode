@@ -698,4 +698,4 @@ at its root (the contrast boost works around it).
 
 ## Team
 
-Praise Chopde · Ayush Ahir · Saumya J
+Praise Chopde · Ayush Ahir · Saumya J · Divyanshi Kashyap
