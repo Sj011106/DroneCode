@@ -1,0 +1,18 @@
+04:14:48  === sitl_link_check start tcp:127.0.0.1:5762 ===
+04:18:34  === sitl_link_check start tcp:127.0.0.1:5763 ===
+04:18:35  connected, flightmode=STABILIZE, mode_age=0.02
+04:18:35  1. switching STABILIZE/LOITER/ALT_HOLD for 15 s
+04:18:50  1. PASS - mode_age < 1.5 s and never inf (max 0.96 s)
+04:18:50  2. HEARTBEAT branch in drone_link.py checks:
+04:18:50       get_srcSystem() == self.conn.target_system
+04:18:50       msg.type != mavutil.mavlink.MAV_TYPE_GCS
+04:18:50       msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID
+04:18:50  2. PASS - own GCS/onboard heartbeats cannot refresh mode_age 
+04:18:50  3. LOITER, camera covered (quality 0) up to 12 s
+04:18:50    REANCHOR
+04:18:53    SET_MODE LAND (flightmode=LOITER)
+04:18:56  3. PASS - exactly one LAND, mode is LAND, no FREEZE (sends=['LAND'], mode=LAND, slowest iteration 0.2 ms)
+04:18:56  4. LOITER, camera covered, pilot -> ALT_HOLD after 1 s
+04:18:57    REANCHOR
+04:19:05  4. PASS - no LAND after pilot takeover (sends=[], mode=ALT_HOLD)
+04:19:06  RESULT: 4/4

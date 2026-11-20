@@ -1,0 +1,56 @@
+
+===== run 2026-11-19 05:55:50 =====
+[1] connecting to tcp:127.0.0.1:5763
+[2] baseline 10 s (origin set at start; local N/E once per second)
+    t= 0s  local N/E = None  origin_set=True
+    t= 1s  local N/E = (-0.01347580086439848, 0.012956634163856506)  origin_set=True
+    t= 2s  local N/E = (-0.01347205601632595, 0.013056374154984951)  origin_set=True
+    t= 3s  local N/E = (-0.013677849434316158, 0.013301354832947254)  origin_set=True
+    t= 4s  local N/E = (-0.013618332333862782, 0.013139446265995502)  origin_set=True
+    t= 5s  local N/E = (-0.013424444943666458, 0.012812651693820953)  origin_set=True
+    t= 6s  local N/E = (-0.01350331213325262, 0.012840816751122475)  origin_set=True
+    t= 7s  local N/E = (-0.013574523851275444, 0.012953771278262138)  origin_set=True
+    t= 8s  local N/E = (-0.01359629724174738, 0.013089554384350777)  origin_set=True
+    t= 9s  local N/E = (-0.01382969506084919, 0.013388808816671371)  origin_set=True
+[3] sending ODOMETRY 20 Hz for 40 s (north=east=down=0, quality 80, height 30.0 m, focal 416.0 px, reset_counter=1)
+[4] waiting for ack, then monitoring 25 s (N/E at switch = (-0.01353041734546423, 0.013324317522346973))
+    t= 5.0s [VISION] N/E = (-0.01353041734546423, 0.013324317522346973)  max|dN|,|dE| so far = 0.000, 0.000 m  sent=101
+    acked_source == VISION after 0.01 s
+    t= 6.0s [VISION] N/E = (-0.00795023888349533, 0.007742174435406923)  max|dN|,|dE| so far = 0.006, 0.006 m  sent=121
+    t= 7.0s [VISION] N/E = (-0.005558529868721962, 0.005447889678180218)  max|dN|,|dE| so far = 0.008, 0.008 m  sent=141
+    t= 8.0s [VISION] N/E = (-0.003263242542743683, 0.003197931218892336)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=161
+    t= 9.0s [VISION] N/E = (-0.003434005891904235, 0.0032801891211420298)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=181
+    t=10.0s [VISION] N/E = (-0.003934457898139954, 0.0036240548361092806)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=201
+    t=11.0s [VISION] N/E = (-0.004540563095360994, 0.004147778265178204)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=221
+    t=12.0s [VISION] N/E = (-0.004702731501311064, 0.004298603627830744)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=241
+    t=13.0s [VISION] N/E = (-0.004711620509624481, 0.004296884406358004)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=261
+    t=14.0s [VISION] N/E = (-0.00452771969139576, 0.00411435030400753)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=281
+    t=15.0s [VISION] N/E = (-0.004084519110620022, 0.0035889402497559786)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=301
+    t=16.0s [VISION] N/E = (-0.003386727999895811, 0.0030464206356555223)  max|dN|,|dE| so far = 0.010, 0.010 m  sent=321
+    t=17.0s [VISION] N/E = (-0.0028776482213288546, 0.002576784696429968)  max|dN|,|dE| so far = 0.011, 0.011 m  sent=341
+    t=18.0s [VISION] N/E = (-0.0023239036090672016, 0.0022178078070282936)  max|dN|,|dE| so far = 0.011, 0.011 m  sent=361
+    t=19.0s [VISION] N/E = (-0.0018351958133280277, 0.0017479616217315197)  max|dN|,|dE| so far = 0.012, 0.012 m  sent=381
+    t=20.0s [VISION] N/E = (-0.0014841915108263493, 0.001226734253577888)  max|dN|,|dE| so far = 0.012, 0.012 m  sent=401
+    t=21.0s [VISION] N/E = (-0.0011197784915566444, 0.0008214800036512315)  max|dN|,|dE| so far = 0.012, 0.013 m  sent=421
+    t=22.0s [VISION] N/E = (-0.0006383205763995647, 0.0005577145493589342)  max|dN|,|dE| so far = 0.013, 0.013 m  sent=441
+    t=23.0s [VISION] N/E = (-8.504834841005504e-05, 0.00020871894957963377)  max|dN|,|dE| so far = 0.013, 0.013 m  sent=461
+    t=24.0s [VISION] N/E = (0.00027421439881436527, -0.00019567666458897293)  max|dN|,|dE| so far = 0.014, 0.014 m  sent=481
+    t=25.0s [VISION] N/E = (0.0005157859995961189, -0.0005098582478240132)  max|dN|,|dE| so far = 0.014, 0.014 m  sent=501
+    t=26.0s [VISION] N/E = (0.0007018923060968518, -0.0006952892290428281)  max|dN|,|dE| so far = 0.014, 0.014 m  sent=521
+    t=27.0s [VISION] N/E = (0.0010325767798349261, -0.0009692895691841841)  max|dN|,|dE| so far = 0.015, 0.014 m  sent=541
+    t=28.0s [VISION] N/E = (0.0013581867096945643, -0.001270841807126999)  max|dN|,|dE| so far = 0.015, 0.015 m  sent=561
+    t=29.0s [VISION] N/E = (0.001514305709861219, -0.0015729435253888369)  max|dN|,|dE| so far = 0.015, 0.015 m  sent=581
+[5] back to GPS; watching 10 s for recovery
+    t=30.0s [GPS-recover] N/E = (0.0016901014605537057, -0.0017501262482255697)  max|dN|,|dE| so far = 0.015, 0.015 m  sent=601
+    t=31.0s [GPS-recover] N/E = (0.0026288575027137995, -0.0027202742639929056)  max|dN|,|dE| so far = 0.016, 0.016 m  sent=621
+    t=32.0s [GPS-recover] N/E = (0.0051150755025446415, -0.005249969195574522)  max|dN|,|dE| so far = 0.019, 0.019 m  sent=641
+    t=33.0s [GPS-recover] N/E = (0.005873886868357658, -0.00586162693798542)  max|dN|,|dE| so far = 0.019, 0.019 m  sent=661
+    t=34.0s [GPS-recover] N/E = (0.005960170645266771, -0.005693110171705484)  max|dN|,|dE| so far = 0.019, 0.019 m  sent=681
+    t=35.0s [GPS-recover] N/E = (0.006202804856002331, -0.00592815363779664)  max|dN|,|dE| so far = 0.020, 0.019 m  sent=701
+    t=36.0s [GPS-recover] N/E = (0.006722389254719019, -0.0064928787760436535)  max|dN|,|dE| so far = 0.020, 0.020 m  sent=721
+    t=37.0s [GPS-recover] N/E = (0.00706722866743803, -0.006877063307911158)  max|dN|,|dE| so far = 0.021, 0.020 m  sent=741
+    t=38.0s [GPS-recover] N/E = (0.007270755711942911, -0.007162174209952354)  max|dN|,|dE| so far = 0.021, 0.020 m  sent=761
+    t=39.0s [GPS-recover] N/E = (0.007641807664185762, -0.007603724952787161)  max|dN|,|dE| so far = 0.021, 0.021 m  sent=781
+[5] recovery: final N/E = (0.007965846918523312, -0.007989916950464249), offset from pre-switch = 0.021 m -> RECOVERED; acked_source now = 1
+
+PASS  (max drift 0.021 m, no 'stopped aiding')

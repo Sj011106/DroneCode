@@ -1,0 +1,28 @@
+03:57:15  === sitl_handover_check start, connecting tcp:127.0.0.1:5762 ===
+03:57:16  connected, mode now None
+03:57:16    pilot -> STABILIZE
+03:57:17    pilot -> LOITER
+03:57:18  hold mode that works here: LOITER
+03:57:18    pilot -> STABILIZE
+03:57:19  1. STABILIZE, camera covered 5 s
+03:57:24  CHECK 1: PASS - no actions outside a hold mode  actions=[] mode=STABILIZE
+03:57:24  2. pilot -> LOITER, camera good 3 s
+03:57:24    pilot -> LOITER
+03:57:24    handover action: REANCHOR   (mode=LOITER, q=50)
+03:57:27  CHECK 2: PASS - REANCHOR on entering hold  actions=['REANCHOR'] mode=LOITER
+03:57:27  6. camera covered 1.5 s then uncovered
+03:57:32  CHECK 6: PASS - short loss does not LAND  actions=[] mode=LOITER
+03:57:32  3. camera covered ~8 s in hold
+03:57:35    handover action: ('SET_MODE', 'LAND')   (mode=LOITER, q=0)
+03:57:38  CHECK 3: PASS - LAND sent exactly once and mode is LAND  LAND sends=1 mode=LAND
+03:57:38  5. pilot -> STABILIZE then LOITER, camera good
+03:57:38    pilot -> STABILIZE
+03:57:40    pilot -> LOITER
+03:57:40    handover action: REANCHOR   (mode=LOITER, q=50)
+03:57:43  CHECK 5: PASS - REANCHOR again on re-entering hold  actions=['REANCHOR'] mode=LOITER
+03:57:43  4. camera covered 2 s, pilot switches to ALT_HOLD, camera stays covered 8 s
+03:57:45    pilot -> ALT_HOLD
+03:57:53  CHECK 4: PASS - pilot takeover (ALT_HOLD) causes no failsafe  actions=[] mode=ALT_HOLD
+03:57:53    pilot -> STABILIZE
+03:57:54  RESULT: 6/6 checks passed
+03:57:54  NOTE: this proves handover.py logic against the simulator only; vision_hold.py wiring (home save, camera) still needs a machine where OpenCV loads.
