@@ -171,12 +171,13 @@ assert trusted > len(live) // 2, "the live run must actually produce positions (
 print("\nTest 3: --set changes settings used when our objects are created")
 from fusion.height import HeightFilter
 from fusion.imu_check import ImuCheck
-from recovery.failsafe import Failsafe
+from handover import Handover
 from recovery.recovery import Recovery
 config.IMU_CHECK_MAX_DEG, config.HEIGHT_MAX_RATE_MPS, config.RECOVERY_MIN_INLIERS = 20.0, 99.0, 5
 config.FAILSAFE_AFTER_S = 7.0
-got = (ImuCheck().max_deg, HeightFilter().max_rate, Recovery(None).min_inliers, Failsafe().after_s)
-print(f"  ImuCheck {got[0]}, HeightFilter {got[1]}, Recovery {got[2]}, Failsafe {got[3]} (should be 20, 99, 5, 7)")
+got = (ImuCheck().max_deg, HeightFilter().max_rate, Recovery(None).min_inliers,
+       Handover(failsafe_after_s=config.FAILSAFE_AFTER_S).failsafe_after_s)
+print(f"  ImuCheck {got[0]}, HeightFilter {got[1]}, Recovery {got[2]}, Handover {got[3]} (should be 20, 99, 5, 7)")
 assert got == (20.0, 99.0, 5, 7.0)
 for k, v in DEFAULTS.items():
     setattr(config, k, v)

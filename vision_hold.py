@@ -60,7 +60,6 @@ from compute.profiler import Profiler
 from fusion.height import HeightFilter
 from fusion.imu_check import ImuCheck
 from fusion.tilt import cancel_tilt
-from recovery.failsafe import Failsafe
 from recovery.recovery import Recovery
 from tools.replay import Recorder, Replay, auto_folder
 from vision.enhance import downscale, enhance, scale_camera_matrix
@@ -177,7 +176,7 @@ def main(argv=None):                                             # NEW: argv for
                                     enabled=config.USE_ROLLING_SHUTTER)   # NEW: explicit, so --set works
     health = HealthChecker()
     imu_check, height_filter = ImuCheck(), HeightFilter()        # NEW
-    recovery, failsafe = Recovery(tracker), Failsafe()           # NEW
+    recovery = Recovery(tracker)                                 # NEW
     rehome = Rehome()                                            # NEW: new reference while climbing
     prof = Profiler(budget_ms=1000 / config.TARGET_FPS)          # NEW
     budget = FrameBudget(camera_fps=cap.get(cv2.CAP_PROP_FPS) or None,          # NEW
