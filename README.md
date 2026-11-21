@@ -192,6 +192,7 @@ aircraft**: the drone manual warns that a wrong version resets the flight contro
 ```
 systemctl enable --now msp_sender vision_hold     # start now and at every boot
 journalctl -u vision_hold -f                      # the live estimate for the judge
+# STAGE 2 live view: laptop browser -> http://192.168.75.1:8088 (camera + estimate + track; docs/LIVE_VIEW.md)
 systemctl kill -s USR1 vision_hold                # "zero here": save a new home at the start mark
 ```
 On the bench (disarmed) the height is taken as `BENCH_HEIGHT_M` (1 m) when home is saved, and

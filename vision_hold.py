@@ -235,6 +235,8 @@ def main(argv=None):                                             # NEW: argv for
     bench_height = args.fixed_height                         # STAGE 2 bench: height now, from the picture's scale
     from link.apb_sensors import Gyro                        # STAGE 2 bench step 1: the APB's own IMU, read in
     apb_gyro = Gyro()                                        # THIS process (None-safe off the board)
+    from tools.live_view import LiveView                     # STAGE 2: live view, laptop browser http://192.168.75.1:8088
+    live = LiveView()                                        # (never raises; no work while no browser is open)
 
     def act_on(actions):
         """Do what handover.py asked. Returns True if it asked for a new HOME (REANCHOR)."""
@@ -314,6 +316,7 @@ def main(argv=None):                                             # NEW: argv for
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
             small = downscale(to_gray(frame))                    # NEW: PROCESS_WIDTH (APB CPU). STAGE 2: grey directly
             gray = enhance(small)                                # NEW: enhance() = contrast boost
+            live.frame(gray)                                     # STAGE 2: live view shows the picture the tracker sees
             if not k_scaled:                                     # NEW: lens K for the processed size
                 full_w, full_h = (config.CAMERA_SIZE if frame.ndim == 2 and frame.shape[0] == 1 else frame.shape[1::-1])
                 orig_w = (replay.orig_width if replay else None) or full_w
@@ -362,6 +365,8 @@ def main(argv=None):                                             # NEW: argv for
             if old_ref is not None and home_pending:             # NEW: new home failed (poor texture):
                 tracker.__dict__.update(old_ref)                 # keep tracking the OLD home meanwhile
             if not home_saved:
+                live.state(ready=False, status="NO HOME", reason="no home picture yet (not enough ground texture)",
+                           engaged=getattr(link, "engaged", False), sticks=getattr(link, "last_sticks", None))   # STAGE 2: live view
                 if config.STATUS_LINE_HZ and not replay and t_capture - last_status >= 1.0:
                     last_status = t_capture
                     print("NOT READY  no home picture yet (not enough ground texture)", flush=True)
@@ -548,6 +553,14 @@ def main(argv=None):                                             # NEW: argv for
                           f"   height change {height - (origin['height'] or height):+5.2f} m   q={quality}{imu}", flush=True)
                 else:
                     print(f"NOT READY  {rep.status}: {'; '.join(rep.reasons) or 'no height'}{imu}", flush=True)
+            live.state(ready=quality > 0, status=rep.status,           # STAGE 2: live view (the same estimate as
+                       reason="; ".join(rep.reasons) or ("" if quality > 0 else "no height"),   # the status line)
+                       quality=quality, north_m=north, east_m=east,
+                       yaw0=(origin["att"][2] if origin and origin["att"] else att[2]),
+                       height_m=height,
+                       height_change_m=(height - origin["height"]) if (origin and origin["height"] and height) else None,
+                       engaged=getattr(link, "engaged", False), sticks=getattr(link, "last_sticks", None),
+                       relocks=recovery.relocks, rehomes=rehome.count)
             if is_camera and not isinstance(cap, LatestFrame):   # (the grab thread already drops them)                                        # NEW: fell behind -> drop stale frames
                 for _ in range(budget.frames_to_drop(time.time() - t_capture, t_capture - t_read)):
                     cap.grab()
