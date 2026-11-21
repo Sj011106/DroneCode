@@ -76,10 +76,10 @@ class BetaflightLink(DroneLink):
         self.acked_source = self.pending_source = None
         self.mode_time = None
         self.engaged = False
-        self.armed = None                                  # STAGE 2: the flight controller's own armed flag, via the sender
         self._wait_reset = None                            # ENGAGE GUARD: reset_counter seen at engage
         self._last_reset = None
         self.last_sticks = NEUTRAL                         # for tests and the log
+        self.slew = position_controller.SlewLimiter()      # STAGE 2: no jerks = no smeared pictures
         self._tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # BETAFLIGHT CHANGES
         self.hold = position_controller.HoldController()
@@ -107,10 +107,10 @@ class BetaflightLink(DroneLink):
         if tele.get("alt") is not None:
             self.local_z = (tele["t"], -tele["alt"])       # DroneLink.height() reads this (down = +)
         self.rc = {i + 1: v for i, v in enumerate(tele.get("rc") or [])}
-        self.armed = tele.get("armed")
         engaged = bool(tele.get("engaged"))
         arm = self.rc.get(config.BF_ARM_CHANNEL)
-        self.armed = arm is not None and arm >= 1500
+        fc_armed = tele.get("armed")                     # STAGE 2 (measured): the FC's own flag first; with the
+        self.armed = fc_armed if fc_armed is not None else (arm is not None and arm >= 1500)   # radio off CH5 reads 1775
         if engaged and not self.engaged:
             self._wait_reset = self._last_reset            # centred sticks until the new home is saved
             # BETAFLIGHT CHANGE: in flight the I term starts at the lean the pilot holds against the wind. On the
@@ -175,7 +175,7 @@ class BetaflightLink(DroneLink):
     def bench_height(self):
         """STAGE 2 bench: disarmed (CH5 low; props off, a judge carries the aircraft about 1 m up) ->
         config.BENCH_HEIGHT_M. Armed, or no radio data yet -> None (the barometer height is used)."""
-        if self.armed is not None:                         # the sender's answer (flight controller's own flag)
+        if self.rc:                                        # armed already prefers the FC's own flag
             return None if self.armed else config.BENCH_HEIGHT_M
         arm = self.rc.get(config.BF_ARM_CHANNEL)
         return config.BENCH_HEIGHT_M if arm is not None and arm < 1500 else None
@@ -189,14 +189,16 @@ class BetaflightLink(DroneLink):
         if self._wait_reset is not None and reset_counter != self._wait_reset:
             self._wait_reset = None                        # the engage home is saved: our position counts from it
         if quality <= 0 or self._wait_reset is not None or not self.engaged:
-            self.last_sticks = NEUTRAL
+            self.last_sticks = NEUTRAL                     # centred AT ONCE (never slewed)
+            self.slew.reset()
         else:
             # BETAFLIGHT CHANGE: PD + I in the home-heading frame, Betaflight's own stick curve. att[2] is the
             # heading vision_hold.py made north/east with (the camera's, by default), so it cancels exactly.
             yaw = att[2]
             vf, vr = float(vel_body[0]), float(vel_body[1])
             v_n, v_e = vf * math.cos(yaw) - vr * math.sin(yaw), vf * math.sin(yaw) + vr * math.cos(yaw)
-            self.last_sticks = self.hold.update(t_capture, north, east, v_n, v_e, yaw, integrate=self.armed)
+            wanted = self.hold.update(t_capture, north, east, v_n, v_e, yaw, integrate=self.armed)
+            self.last_sticks = self.slew(t_capture, wanted)   # STAGE 2: at most BF_MAX_TILT_RATE_DEG_S
         try:
             self._tx.sendto(json.dumps(dict(roll=self.last_sticks[0], pitch=self.last_sticks[1])).encode(),
                             ("127.0.0.1", config.BF_SENDER_PORT))

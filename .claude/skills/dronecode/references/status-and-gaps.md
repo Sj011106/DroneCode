@@ -190,6 +190,15 @@ The team has not decided. Don't assume either route; ask, or state which route a
 - The ceiling advisor's 0.5 deg tilt error is a simulator number and dominates its prediction.
 - Camera mount angle (0 to 30 deg adjustable) and image orientation relative to the nose are unknown.
 
+## 5b. Cameras (21 Nov 2026, docs/CAMERAS.md)
+- Front camera (Justice A, /dev/video3): reader `vision/front_camera.py` (UYVY grey = byte 1, one field,
+  partial/no-signal dropped), check `tools/front_cam.py`, optional `deploy/front_view.service`. Not in the hold.
+- Blur: `tools/blur_check.py` separates motion / vibration / focus / 640-shrink detail. Home waits for a sharp
+  picture (`HOME_SHARPEST`), lean requests slew-limited (`BF_MAX_TILT_RATE_DEG_S`), grab thread uses 4 buffers and
+  driver timestamps. Off until flown: `BLUR_SKIP_RATIO`, `HIGH_ALT_CROP_FROM_M` (full-res lens-centre crop high up).
+- Lens: repo `calib.npz` is still the datasheet (623 px); the measured 874 px file must be copied in.
+  `tools/centre_mask.py` limits landmarks to the measured centre.
+
 ## 6. Questions for the organisers
 1. Does an EKF heading that was set with GPS before engage count as "GPS-aided state" during the hold?
 2. Betaflight: what throttle is expected at engage; may we read the pilot's sticks over MSP?

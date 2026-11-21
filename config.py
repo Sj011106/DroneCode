@@ -201,6 +201,34 @@ CAMERA_THREAD = True         # MEASURED: read() always waits ~33 ms for the NEXT
 CAMERA_RAW_GREY = True       # MEASURED: letting OpenCV turn every 1920x1080 frame into colour cost 38 ms a frame
                              # (12 fps in total). True = take the camera's own grey channel (the Y of YUYV)
                              # directly. False = the old way
+CAMERA_BUFFERS_WITH_THREAD = 4   # driver queue length when CAMERA_THREAD is on. With ONE buffer the driver has
+                             # nowhere to put the next picture while we hold the current one and drops it (our
+                             # guess for the measured "read() always waits ~33 ms" = 30 of 60 pictures a second).
+                             # The grab thread empties the queue all the time, so 4 is never stale.
+                             # MEASURE: python -m tools.blur_check --tag buf1 --buffers 1  vs  --buffers 4
+CAMERA_DRIVER_TIMESTAMP = True   # True = a picture's time comes from the camera driver (V4L2 buffer time = end of
+                             # the picture, Stage 2 section 02), moved back by READOUT_S / 2 to the middle row.
+                             # False = the moment our grab thread received it (later by the camera latency).
+                             # Falls back by itself when the driver's clock is not time.monotonic.
+
+# ---------------- Blur (STAGE 2, vision/sharpness.py; docs/CAMERAS.md) ----------------
+HOME_SHARPEST = True         # when home is due, wait for a picture at least HOME_SHARP_RATIO as sharp as usual ...
+HOME_SHARP_RATIO = 0.6
+HOME_SHARP_MAX_WAIT_FRAMES = 8   # ... but never longer than this many pictures (~0.6 s at 13 fps)
+BLUR_SKIP_RATIO = None       # e.g. 0.4: do not measure from a picture this much blurrier than usual. None = off.
+                             # Turn on only if tools/blur_check.py shows sharpness falling with turn rate.
+BLUR_SKIP_MAX_IN_A_ROW = 2   # never skip more pictures than this in a row (the sender keeps the last request)
+
+# ---------------- High-altitude picture (STAGE 2, vision/process_mode.py) ----------------
+HIGH_ALT_CROP_FROM_M = None  # e.g. 15.0: engaged at or above this barometer height -> track a FULL-RESOLUTION crop
+                             # of the lens centre instead of the 640-wide whole picture (sharper ground, and only
+                             # the calibrated part of the lens). Chosen once per engage. None = off (not flown yet)
+HIGH_ALT_CROP_SIZE = (960, 960)  # crop width, height in full-resolution pixels (~4x the work of 640x360)
+
+# ---------------- Front camera (STAGE 2, vision/front_camera.py; optional, NOT used by the hold) ----------------
+FRONT_CAMERA_DEVICE = "/dev/video3"   # Justice A through the ADV7282 decoder: 720x576 PAL, interlaced
+FRONT_CAMERA_FORMAT = "UYVY"          # the decoder's own byte order. tools/front_cam.py --fmt YUYV if it looks wrong
+FRONT_VIEW_PORT = 8089                # its browser view (the down camera's stays on LIVE_VIEW_PORT)
 
 # ---------------- Flight controller route (STAGE 2) ----------------
 # "ardupilot"  = MAVLink ODOMETRY to ArduCopter (link/drone_link.py). Needs the team to flash and tune it.
@@ -251,6 +279,10 @@ BF_DEADBAND_US = 0           # Betaflight `deadband`
 BF_MAX_TILT_DEG = 15.0       # BETAFLIGHT CHANGE (was 8): we never ask for more lean than this (also enforced again
                              # inside the sender, in DEGREES through the curve). Holding against wind needs about
                              # atan(0.28 * wind / 9.81): 8 deg holds only ~5 m/s; 15 deg ~9 m/s (wind simulation)
+BF_MAX_TILT_RATE_DEG_S = 40.0    # STAGE 2 (blur): our lean request may change by at most this many degrees a
+                             # second (0 -> 8 deg in 0.2 s), measured in DEGREES through the stick curve. Every jerk of ours turns the drone while a picture
+                             # is taken and smears it (the camera has no exposure control). Not ready -> centred
+                             # AT ONCE, never slowly. None = no limit (the old way)
 BF_KP_DEG_PER_M = 6.0        # lean per metre of position error
 BF_KD_DEG_PER_MPS = 10.0     # lean per m/s of speed (the brake)
 BF_KI_DEG_PER_M_S = 1.0      # BETAFLIGHT CHANGE: lean added per metre per second of steady error (wind). It STARTS

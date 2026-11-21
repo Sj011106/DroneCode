@@ -35,7 +35,8 @@ switch** (CH10), and from that moment our code holds the position until the pilo
 
 Other documents: [`docs/WORKLIST.md`](docs/WORKLIST.md) (what to do next, in order),
 [`docs/EVIDENCE.md`](docs/EVIDENCE.md) (what we show the judges per scoring item),
-[`docs/hardware.md`](docs/hardware.md) (hardware facts), [`docs/presentation_notes.md`](docs/presentation_notes.md).
+[`docs/hardware.md`](docs/hardware.md) (hardware facts), [`docs/presentation_notes.md`](docs/presentation_notes.md),
+[`docs/CAMERAS.md`](docs/CAMERAS.md) (front camera, blur, lens centre: tests to run on the APB).
 
 ---
 

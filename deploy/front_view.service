@@ -1,0 +1,30 @@
+# =====================================================================================
+# deploy/front_view.service  -  forward camera (Justice A) in a browser, low priority   STAGE 2
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS
+#   OPTIONAL. Shows the front camera on http://192.168.75.1:8089 (2 pictures a second) for
+#   the operator and as evidence. It never talks to the flight controller and runs at the
+#   lowest CPU priority, so the down camera's position hold always comes first.
+#   install.sh installs it but NEVER enables it. Enable only after
+#       venv/bin/python -m tools.front_cam          says "VERDICT: working"
+#   and after checking the hold's frame rate does not drop with it running (docs/CAMERAS.md):
+#       systemctl enable --now front_view
+#   Stop it at once if vision_hold's pictures-per-second drop:   systemctl disable --now front_view
+# =====================================================================================
+
+[Unit]
+Description=Front camera view (Justice A, optional, never steers)
+After=local-fs.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@DIR@/venv/bin/python -m tools.front_cam --serve
+Restart=on-failure
+RestartSec=5
+Nice=19
+CPUWeight=10
+
+[Install]
+WantedBy=multi-user.target

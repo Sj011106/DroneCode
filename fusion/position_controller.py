@@ -36,6 +36,10 @@
 #   The SIGNS are what the bench test checks (Stage 2 section 05 step 5: "roll and pitch
 #   oppose the move"); BF_ROLL_SIGN / BF_PITCH_SIGN flip them if the bench shows the opposite.
 #   Proof: tests/test_betaflight.py, tests/test_bf_hold.py (wind simulation).
+#   STAGE 2 (blur): SlewLimiter lets the lean request change by at most BF_MAX_TILT_RATE_DEG_S (degrees,
+#     through the stick curve). The Justice D has no exposure control, so every jerk of ours turns the
+#     drone while a picture is taken and smears it. Not ready -> link/betaflight_link.py centres the
+#     sticks AT ONCE and resets it.
 #
 # REFERENCES
 #   - Stage 2 package section 03 ("your code is the position controller and the height
@@ -128,3 +132,32 @@ class AltHold:
         if abs(raw) < config.BF_THROTTLE_AUTHORITY:                        # anti-windup
             self.i = _clip(self.i + config.BF_ALT_KI_US_PER_M_S * height_error_m * dt, config.BF_THROTTLE_AUTHORITY)
         return throttle(hold_us, height_error_m, climb_mps, self.i)
+
+
+class SlewLimiter:
+    """STAGE 2: smooth lean requests. (roll_us, pitch_us) may move towards the wanted value by at most
+    config.BF_MAX_TILT_RATE_DEG_S degrees of LEAN per second of t (converted through link/stick_curve.py, the
+    same curve Betaflight uses). reset() = back to centred, at once (not ready must be centred immediately).
+    None as the rate = no limit."""
+
+    def __init__(self):
+        self.last, self.t = (1500, 1500), None
+
+    def reset(self):
+        self.last, self.t = (1500, 1500), None
+
+    def __call__(self, t, wanted):
+        rate = getattr(config, "BF_MAX_TILT_RATE_DEG_S", None)
+        if rate is None:
+            self.last, self.t = tuple(wanted), t
+            return self.last
+        dt = 0.02 if self.t is None else min(max(t - self.t, 0.0), 0.2)   # first call: one sender tick
+        out = []
+        for old, new in zip(self.last, wanted):
+            a_old, a_new = stick_curve.angle_from_us(old), stick_curve.angle_from_us(new)
+            if abs(a_new - a_old) <= rate * dt:
+                out.append(new)                                       # within reach: exactly what was asked
+            else:
+                out.append(round(stick_curve.us_from_angle(a_old + _clip(a_new - a_old, rate * dt))))
+        self.last, self.t = tuple(out), t
+        return self.last

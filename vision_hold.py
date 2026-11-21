@@ -73,6 +73,8 @@ from recovery.recovery import Recovery
 from tools.replay import Recorder, Replay, auto_folder
 from vision.enhance import downscale, enhance, scale_camera_matrix
 from vision.rehome import Rehome
+from vision.process_mode import ProcessMode                      # STAGE 2: sharp centre crop high up (off by default)
+from vision.sharpness import SharpnessGate, sharpness            # STAGE 2: never save home from a blurry picture
 from vision.rolling_shutter import RollingShutterTracker, attitude_near
 from vision.timing import load_timing
 from safety import trial_mode                                    # NEW (Ayush A1): GPS can't take over
@@ -186,7 +188,8 @@ def main(argv=None):                                             # NEW: argv for
     frame_gap = 0.0 if is_camera else 1.0 / camera_fps(cap, 30)  # play videos in real time
     if replay:
         frame_gap = 0.0                                          # NEW: replay as fast as possible
-    low_latency = is_camera and make_low_latency(cap)            # NEW: no stale frames in the queue
+    buffers = config.CAMERA_BUFFERS_WITH_THREAD if config.CAMERA_THREAD else 1   # STAGE 2: the grab thread
+    low_latency = is_camera and make_low_latency(cap, buffers)   # drains the queue; 1 buffer there = lost frames
     if is_camera:                                                # STAGE 2 (measured): the first frames are dark
         warm_until = time.time() + config.CAMERA_WARMUP_S
         while time.time() < warm_until:
@@ -194,11 +197,18 @@ def main(argv=None):                                             # NEW: argv for
         if config.CAMERA_THREAD:                                 # STAGE 2 (measured): never wait for the driver
             cap = LatestFrame(cap, clock)
     if is_camera:                                                # NEW
-        print(f"Camera 1-frame queue: {'yes' if low_latency else 'not supported by this backend'}")
+        print(f"Camera {buffers}-frame queue: {'yes' if low_latency else 'not supported by this backend'}")
 
     K, dist = load_calibration()
     if config.CALIB_FILE != "calib.npz":                         # NEW: tests use their own lens file
         K, dist = load_calibration(config.CALIB_FILE)
+    try:                                                         # STAGE 2: the measured lens (874 px), not the
+        _lens = np.load(config.CALIB_FILE)                       # datasheet (623 px = every distance 40 % too big)
+        if "source" in _lens.files and str(_lens["source"]) == "datasheet" and is_camera:
+            print(f"WARNING: {config.CALIB_FILE} is the DATASHEET lens (focal {float(_lens['K'][0, 0]):.0f} px). "
+                  f"Copy the one you MEASURED on the aircraft (874 px) into the repo folder.")
+    except Exception:
+        pass
     # NEW: Saumya's GroundTracker + rolling-shutter correction (identical if switched off)
     timing = load_timing()
     print(f"Rolling shutter: {'ON' if config.USE_ROLLING_SHUTTER else 'OFF'}, {timing}")
@@ -214,7 +224,7 @@ def main(argv=None):                                             # NEW: argv for
     rehome = Rehome()                                            # NEW: new reference while climbing
     prof = Profiler(budget_ms=1000 / config.TARGET_FPS)          # NEW
     budget = FrameBudget(camera_fps=camera_fps(cap, config.CAMERA_FPS if is_camera else None),   # NEW (STAGE 2: -1 on the APB)
-                         queue_len=1 if low_latency else 4)
+                         queue_len=buffers if low_latency else 4)
     home_att = None                                              # NEW: attitude when HOME was saved
     trigger = replay.trigger if replay else HomeTrigger(args.trigger)   # NEW: recorded trigger in replay
     rec_dir = auto_folder() if args.record == "auto" else args.record   # NEW
@@ -289,6 +299,7 @@ def main(argv=None):                                             # NEW: argv for
     prev_ne, vel_ned = None, np.zeros(3)
     started, next_frame = time.time(), time.time()
     k_scaled, imu_bad_streak = False, 0                          # NEW
+    proc, sharp_gate, home_wait = ProcessMode(), SharpnessGate(), 0   # STAGE 2 (docs/CAMERAS.md)
     print(f"Running. Home trigger = '{args.trigger}'. Logging to {log_path}. Ctrl+C to stop.")
     monitors = SideMonitors(link, log_path)                      # NEW (Ayush A4/A5): never steers
 
@@ -332,7 +343,10 @@ def main(argv=None):                                             # NEW: argv for
                 continue
             if config.CAMERA_UPSIDE_DOWN:                        # STAGE 2: camera mounted the other way round
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
-            small = downscale(to_gray(frame))                    # NEW: PROCESS_WIDTH (APB CPU). STAGE 2: grey directly
+            full_gray = to_gray(frame)                           # STAGE 2: grey directly
+            small = proc.image(full_gray)                        # PROCESS_WIDTH (APB CPU); STAGE 2: or, engaged
+                                                                 # high up, a full-resolution lens-centre crop
+            sharp_gate.judge(sharpness(small))                   # STAGE 2: how sharp vs the last second
             gray = enhance(small)                                # NEW: enhance() = contrast boost
             live.frame(gray)                                     # STAGE 2: live view shows the picture the tracker sees
             if not k_scaled:                                     # NEW: lens K for the processed size
@@ -341,7 +355,8 @@ def main(argv=None):                                             # NEW: argv for
                 orig_h = round(full_h * orig_w / full_w)
                 K, dist = load_calibration(config.CALIB_FILE, image_size=(orig_w, orig_h))   # size check
                 tracker.dist = dist
-                tracker.K = scale_camera_matrix(K, small.shape[1] / orig_w)
+                proc.set_principal_point(K)                      # STAGE 2: the crop is centred on the lens centre
+                tracker.K = proc.camera_matrix(K, orig_w, small.shape[1])   # = scale_camera_matrix() when small
                 k_scaled = True
             t_frame = timing.mid_time(t_capture)                 # NEW: real capture time (= t_capture until calibrated)
             atts = list(link.attitudes)                          # NEW: ONE frozen IMU snapshot per frame:
@@ -356,15 +371,31 @@ def main(argv=None):                                             # NEW: argv for
             fired = trigger.fired(link) or reanchor_request or bool(zero_here)   # Part D: engage re-anchor is
             reanchor_request = False                             # recorded too. STAGE 2: so is "zero here"
             zero_here.clear()
-            if recorder:                                         # NEW: record raw inputs
-                recorder.add(small, t_capture, fired, link.height(t_capture), atts,
+            if recorder:                                         # NEW: record raw inputs (STAGE 2: always the
+                recorder.add(small if proc.name == "small" else downscale(full_gray),   # 640-wide picture)
+                             t_capture, fired, link.height(t_capture), atts,
                              orig_size=(orig_w, orig_h))
+            if fired and not home_pending:
+                home_wait = 0                                    # STAGE 2: pictures waited for a sharp one
             if fired:
                 home_pending = True                              # try on this frame and the next ones
-            old_ref = dict(tracker.__dict__) if home_pending and home_saved else None   # NEW
-            if home_pending:
+            mode_changed = False
+            if fired and is_camera and proc.enabled:             # STAGE 2: picture mode for THIS hold, chosen once
+                h_now = fixed_height or link.height(t_capture)
+                if proc.choose(h_now, have_K=tracker.K is not None):
+                    print(f"Picture mode -> {proc.name} (engaged at {h_now if h_now is None else round(h_now, 1)} m). "
+                          f"New home from the next picture.")
+                    k_scaled, home_saved, mode_changed = False, False, True   # old home = other picture size
+                    sharp_gate.reset()
+            home_try = (home_pending and not mode_changed        # STAGE 2: wait (a few pictures at most)
+                        and sharp_gate.home_ok(home_wait))       # for a sharp picture before saving home
+            if home_pending and not home_try:
+                home_wait += 1
+            old_ref = dict(tracker.__dict__) if home_try and home_saved else None   # NEW
+            if home_try:
                 n = tracker.set_reference(gray, t_capture)       # NEW: t_capture -> rolling-shutter fix on home too
                 if n >= MIN_HOME_CORNERS:
+                    home_wait = 0
                     health.reset()
                     home_att = attitude_near(atts, t_frame)   # NEW: tilt + IMU check (thread-safe)
                     imu_check.set_home(home_att[2] if home_att else None)
@@ -391,6 +422,8 @@ def main(argv=None):                                             # NEW: argv for
                     last_status = t_capture
                     print("NOT READY  no home picture yet (not enough ground texture)", flush=True)
                 continue
+            if sharp_gate.skip():                                # STAGE 2 (off unless BLUR_SKIP_RATIO): much
+                continue                                         # blurrier than usual = treat as a dropped frame
 
             # ---------- 3. Measure + judge ----------
             att_real = attitude_near(atts, t_frame)    # NEW: thread-safe; None = missing/stale IMU
@@ -468,7 +501,7 @@ def main(argv=None):                                             # NEW: argv for
             # NEW: climbed/descended ~15% -> new reference picture here, position stays continuous
             # STAGE 2 bench: also when the picture slid sideways by REHOME_SHIFT_FRAC of its width (1.5 m carry at 1 m)
             if config.USE_REHOME and quality > 0 and att_real and rehome.due(rep.status, res, gray.shape[1::-1],
-                                                                          inlier_drop=not handover.engaged):
+                                                                          inlier_drop=not handover.engaged and not replay):   # STAGE 2 (integration): 'engaged' is not recorded, so never in replay
                 if rehome.rehome(tracker, health, gray, t_capture, north, east, MIN_HOME_CORNERS):
                     home_att = att_real
                     if not (fixed_height and rehome.scale_min <= res.scale <= rehome.scale_max):
