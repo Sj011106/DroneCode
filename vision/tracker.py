@@ -158,6 +158,24 @@ def to_north_east(shift_px, height_m, focal_px, yaw_rad):
     return north, east
 
 
+def _per_cell_detect():
+    """BETAFLIGHT CHANGE: config.CORNERS_PER_CELL (read at call time so --set and tests can switch it)."""
+    try:
+        import config
+        return bool(getattr(config, "CORNERS_PER_CELL", False))
+    except ImportError:
+        return False
+
+
+def _is_still(M, centre, px=1.5):
+    """BETAFLIGHT CHANGE: does this home->now motion say 'nothing moved' (centre within px, no turn, no zoom)?"""
+    cx, cy = centre
+    dx = M[0, 0] * cx + M[0, 1] * cy + M[0, 2] - cx
+    dy = M[1, 0] * cx + M[1, 1] * cy + M[1, 2] - cy
+    return (math.hypot(dx, dy) < px and abs(math.atan2(M[1, 0], M[0, 0])) < math.radians(0.5)
+            and abs(math.hypot(M[0, 0], M[1, 0]) - 1.0) < 0.01)
+
+
 class GroundTracker:
     def __init__(self, K=None, dist=None, point_filter=None):
         self.K = K
@@ -171,6 +189,12 @@ class GroundTracker:
         self.ref_und = None      # same corners with lens distortion removed
         self.M_last = np.eye(2, 3, dtype=np.float64)  # last good home->now transform
         self.centre = None       # (cx, cy) optical centre in pixels
+        # BETAFLIGHT CHANGE (vision/frozen.py): home points to leave out (attached to us: shoes, legs, own legs),
+        # and where every home point was found in the last frame. None = off = exactly the old behaviour.
+        self.exclude = None
+        self.last_cur = self.last_valid = None
+        self.reject_static = False   # BETAFLIGHT CHANGE: True while the IMU says "we are being carried" (bench):
+                                     # a "nothing moved" answer is then checked against the second-best motion
 
     # ---------- Step 1: Harris corners, spread across the whole image ----------
     def _detect_harris(self, gray):
@@ -182,11 +206,42 @@ class GroundTracker:
             if static is not None:
                 mask = cv2.bitwise_and(mask, static)
 
+        per_cell = max(1, MAX_CORNERS // (GRID[0] * GRID[1]))
         # Ask for LOTS of Harris corners (strongest first)...
         corners = cv2.goodFeaturesToTrack(
             gray, maxCorners=MAX_CORNERS * 4, qualityLevel=HARRIS_QUALITY,
             minDistance=MIN_DISTANCE, mask=mask, blockSize=BLOCK_SIZE,
             useHarrisDetector=True, k=HARRIS_K)
+        if _per_cell_detect():
+            # BETAFLIGHT CHANGE: top up STARVED cells. The search above takes the strongest corners of the whole
+            # picture first, so one strongly textured area (the holder's trousers, shoes, a bag) can take them all
+            # and leave a plain floor with none (tests/test_frozen.py: 144 of 144 on the legs). A cell that got
+            # fewer than a third of its share is searched again on its OWN strength scale. Cells that were fine are
+            # untouched (searching every cell that way added weak, noisy corners: climb test drift 15 -> 31 cm).
+            have = {}
+            for c in (corners if corners is not None else []):
+                x, y = c.ravel()
+                cell = (int(x * GRID[0] / w), int(y * GRID[1] / h))
+                have[cell] = have.get(cell, 0) + 1
+            extra, pad = [], BLOCK_SIZE
+            for gy in range(GRID[1]):
+                for gx in range(GRID[0]):
+                    if have.get((gx, gy), 0) >= max(1, per_cell // 3):
+                        continue
+                    x0, x1 = gx * w // GRID[0], (gx + 1) * w // GRID[0]
+                    y0, y1 = gy * h // GRID[1], (gy + 1) * h // GRID[1]
+                    X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad)
+                    sub = np.zeros((Y1 - Y0, X1 - X0), np.uint8)
+                    sub[y0 - Y0:y1 - Y0, x0 - X0:x1 - X0] = mask[y0:y1, x0:x1]
+                    if not sub.any():
+                        continue
+                    c = cv2.goodFeaturesToTrack(
+                        np.ascontiguousarray(gray[Y0:Y1, X0:X1]), maxCorners=per_cell * 2, qualityLevel=HARRIS_QUALITY,
+                        minDistance=MIN_DISTANCE, mask=sub, blockSize=BLOCK_SIZE, useHarrisDetector=True, k=HARRIS_K)
+                    if c is not None:
+                        extra.append(c + np.float32([X0, Y0]))
+            if extra:
+                corners = np.concatenate(([corners] if corners is not None else []) + extra)
         if corners is None:
             return np.empty((0, 1, 2), np.float32)
         if self.point_filter is not None:                  # drop corners on glare
@@ -195,7 +250,6 @@ class GroundTracker:
                 return np.empty((0, 1, 2), np.float32)
 
         # ...then keep only the best few in each grid cell, so they cover the image.
-        per_cell = max(1, MAX_CORNERS // (GRID[0] * GRID[1]))
         cell_count = {}
         kept = []
         for c in corners:                         # already sorted strongest -> weakest
@@ -228,6 +282,7 @@ class GroundTracker:
         self.ref_pts = self._detect_harris(gray)
         self.ref_und = self._undistort(self.ref_pts)
         self.M_last = np.eye(2, 3, dtype=np.float64)  # at home, nothing has moved
+        self.exclude = self.last_cur = self.last_valid = None   # BETAFLIGHT CHANGE: new home, new list
         return len(self.ref_pts)
 
     def relock(self, M):
@@ -266,6 +321,9 @@ class GroundTracker:
 
         lk_ok = (st1.ravel() == 1) & (st2.ravel() == 1) & inside
         good = lk_ok & (fb_err < FB_MAX_ERROR_PX)          # Step 4: forward-backward check
+        self.last_cur, self.last_valid = cur, good.copy()  # BETAFLIGHT CHANGE: for vision/frozen.py
+        if self.exclude is not None and len(self.exclude) == len(good):
+            good &= ~self.exclude                          # BETAFLIGHT CHANGE: attached to us -> not the floor
         res.n_tracked = int(lk_ok.sum())
         res.n_fb_ok = int(good.sum())
         if res.n_fb_ok < MIN_POINTS:
@@ -283,6 +341,21 @@ class GroundTracker:
             res.reason = "RANSAC found no consistent motion"
             return res
         inl = inl.ravel().astype(bool)
+        # BETAFLIGHT CHANGE (bench, vision/frozen.py): we are being carried but the best motion is "nothing moved"
+        # -> those agreeing points are attached to us (holder's shoes, legs, own legs). If the REST of the points
+        # agree on a real motion, that is the floor: use it. Never while not carried (reject_static False).
+        if self.reject_static and _is_still(M, self.centre) and (~inl).sum() >= MIN_POINTS:
+            rest = np.flatnonzero(~inl)
+            M2, inl2 = cv2.estimateAffinePartial2D(
+                src[rest], dst[rest], method=cv2.RANSAC, ransacReprojThreshold=RANSAC_THRESH_PX,
+                maxIters=2000, confidence=0.99, refineIters=10)
+            if M2 is not None and not _is_still(M2, self.centre):
+                inl2 = inl2.ravel().astype(bool)
+                if inl2.sum() >= max(MIN_INLIERS_TO_UPDATE, 0.3 * len(rest)):
+                    M, inl = M2, np.zeros_like(inl)
+                    inl[rest[inl2]] = True
+                    res.reason = "attached points ignored"
+                    res.n_fb_ok = len(rest)        # the attached ones were never floor candidates (health's ratio)
         res.n_inliers = int(inl.sum())
         res.inlier_pts = dst[inl]
 
@@ -298,7 +371,9 @@ class GroundTracker:
         res.ok = True
 
         # Use this as the prediction for the next frame, if we really trust it
-        if res.n_inliers >= MIN_INLIERS_TO_UPDATE and res.n_inliers >= 0.5 * res.n_fb_ok:
+        # (BETAFLIGHT CHANGE: while carried, "nothing moved" is never kept as the prediction: it is the holder's legs)
+        if (res.n_inliers >= MIN_INLIERS_TO_UPDATE and res.n_inliers >= 0.5 * res.n_fb_ok
+                and not (self.reject_static and _is_still(M, self.centre))):
             self.M_last = M
         return res
 

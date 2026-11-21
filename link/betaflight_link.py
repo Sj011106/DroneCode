@@ -28,6 +28,16 @@
 #   No GNSS anywhere on this route: nothing here or in the sender can request it.
 #   Proof: tests/test_betaflight.py.
 #
+# BETAFLIGHT CHANGES (21 Nov, after Stage 2 + the first hardware session)
+#   - The controller is fusion/position_controller.HoldController (PD + I, Betaflight's own
+#     stick curve). Its I term starts at the lean the pilot holds at the engage moment.
+#   - HEADING: Betaflight corrects its heading with GPS course over ground (no compass), so we
+#     do not use it (config.BF_HEADING_FROM_VISION). The yaw in self.attitudes is our own:
+#     Betaflight's RAW gyro integrated (only if config.BF_GYRO_YAW_SIGN was checked on the
+#     bench; else 0). vision_hold.py takes the heading from the camera.
+#   - Raw accelerometer/gyro samples are kept (self.imu) for moving() ("are we being carried?",
+#     vision/frozen.py) and imu_positions() (optional height from motion, fusion/scale.py).
+#
 # REFERENCES: Stage 2 package Rev 2.0 sections 03-05; handover.py (Part D).
 # =====================================================================================
 import json
@@ -39,6 +49,7 @@ from collections import deque
 
 import config
 from fusion import position_controller
+from fusion.scale import ImuIntegrator
 from link.drone_link import DroneLink
 
 NEUTRAL = (1500, 1500)
@@ -70,22 +81,71 @@ class BetaflightLink(DroneLink):
         self._last_reset = None
         self.last_sticks = NEUTRAL                         # for tests and the log
         self._tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # BETAFLIGHT CHANGES
+        self.hold = position_controller.HoldController()
+        self.armed = False
+        self.imu = deque(maxlen=200)                       # (t, acc in g [3], gyro in deg/s [3]) ~8 s at 25 Hz
+        self.integ = ImuIntegrator()                       # double-integrated raw accel, for fusion/scale.py
+        self.gyro_yaw = 0.0                                # integrated raw gyro yaw (rad), our own heading source
+        self._gyro_bias = 0.0
+        self._last_imu_t = None
+        self._last_att = None
 
     # ----- telemetry from the sender -----
     def on_telemetry(self, tele):
         """One telemetry packet from link/msp_sender.py."""
         self.mode_time = time.monotonic()
+        imu = tele.get("imu")
+        if imu and imu[0] != self._last_imu_t:             # BETAFLIGHT CHANGE: raw sensors (never GPS-corrected)
+            self._on_imu(*imu)
         if tele.get("att"):
-            self.attitudes.append(tuple(tele["att"]))
+            t_att, roll, pitch, bf_yaw = tele["att"]
+            self._last_att = (roll, pitch)
+            if config.BF_HEADING_FROM_VISION:              # never Betaflight's GPS-corrected heading
+                bf_yaw = self.gyro_yaw if config.BF_GYRO_YAW_SIGN else 0.0
+            self.attitudes.append((t_att, roll, pitch, bf_yaw))
         if tele.get("alt") is not None:
             self.local_z = (tele["t"], -tele["alt"])       # DroneLink.height() reads this (down = +)
         self.rc = {i + 1: v for i, v in enumerate(tele.get("rc") or [])}
         self.armed = tele.get("armed")
         engaged = bool(tele.get("engaged"))
+        arm = self.rc.get(config.BF_ARM_CHANNEL)
+        self.armed = arm is not None and arm >= 1500
         if engaged and not self.engaged:
             self._wait_reset = self._last_reset            # centred sticks until the new home is saved
+            # BETAFLIGHT CHANGE: in flight the I term starts at the lean the pilot holds against the wind. On the
+            # bench (disarmed) it starts at 0: a judge's hand tilt must not offset the step 5 response.
+            roll, pitch = (self._last_att or (0.0, 0.0)) if self.armed else (0.0, 0.0)
+            self.hold.engage(lean_fwd_deg=-math.degrees(pitch), lean_right_deg=math.degrees(roll), heading_rad=0.0)
         self.engaged = engaged
         self.conn.flightmode = "POSHOLD" if engaged else "MANUAL"
+
+    def _on_imu(self, t, acc, gyro):
+        """BETAFLIGHT CHANGE: one raw accelerometer (g) + gyro (deg/s) sample from Betaflight."""
+        dt = 0.0 if self._last_imu_t is None else max(0.0, min(0.2, t - self._last_imu_t))
+        self._last_imu_t = t
+        self.imu.append((t, list(acc), list(gyro)))
+        z = gyro[2] if len(gyro) > 2 else 0.0
+        if not self.armed and not self.moving(t):          # at rest on the bench: learn the gyro offset
+            self._gyro_bias += 0.05 * (z - self._gyro_bias)
+        self.gyro_yaw += math.radians(config.BF_GYRO_YAW_SIGN * (z - self._gyro_bias)) * dt
+        self.integ.add(t, [a * 9.80665 for a in acc])
+
+    def moving(self, t=None, window=None):
+        """BETAFLIGHT CHANGE: True if the raw accelerometer wobbled more than FROZEN_MOVING_ACC (m/s^2 RMS of
+        the change in |acc|) or the gyro turned faster than 8 deg/s within the last `window` seconds."""
+        window = config.FROZEN_WINDOW_S if window is None else window
+        if not self.imu:
+            return False
+        t = self.imu[-1][0] if t is None else t
+        recent = [s for s in list(self.imu) if t - window <= s[0] <= t + 0.05]   # list(): one atomic copy (threads)
+        if len(recent) < 4:
+            return False
+        mags = [9.80665 * math.sqrt(sum(a * a for a in s[1])) for s in recent]
+        mean = sum(mags) / len(mags)
+        rms = math.sqrt(sum((m - mean) ** 2 for m in mags) / len(mags))
+        spin = max(math.sqrt(sum(g * g for g in s[2])) for s in recent)
+        return rms >= config.FROZEN_MOVING_ACC or spin >= 8.0
 
     def _reader(self):
         rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -131,10 +191,12 @@ class BetaflightLink(DroneLink):
         if quality <= 0 or self._wait_reset is not None or not self.engaged:
             self.last_sticks = NEUTRAL
         else:
+            # BETAFLIGHT CHANGE: PD + I in the home-heading frame, Betaflight's own stick curve. att[2] is the
+            # heading vision_hold.py made north/east with (the camera's, by default), so it cancels exactly.
             yaw = att[2]
-            forward = north * math.cos(yaw) + east * math.sin(yaw)
-            right = -north * math.sin(yaw) + east * math.cos(yaw)
-            self.last_sticks = position_controller.sticks(forward, right, float(vel_body[0]), float(vel_body[1]))
+            vf, vr = float(vel_body[0]), float(vel_body[1])
+            v_n, v_e = vf * math.cos(yaw) - vr * math.sin(yaw), vf * math.sin(yaw) + vr * math.cos(yaw)
+            self.last_sticks = self.hold.update(t_capture, north, east, v_n, v_e, yaw, integrate=self.armed)
         try:
             self._tx.sendto(json.dumps(dict(roll=self.last_sticks[0], pitch=self.last_sticks[1])).encode(),
                             ("127.0.0.1", config.BF_SENDER_PORT))

@@ -28,7 +28,7 @@ import tempfile
 
 import config
 from fusion import position_controller as pc
-from link import msp
+from link import msp, stick_curve
 from link.apb_sensors import Baro, Gyro, pressure_to_height
 from link.betaflight_link import BetaflightLink
 from link.msp_sender import Sender
@@ -103,7 +103,8 @@ check = 0
 for b in f[3:-1]:
     check ^= b
 assert check == f[-1], "checksum = XOR of size, command, payload"
-assert struct.unpack("<8H", f[5:-1]) == (1500, 1490, 1300, 1500, 1500, 1500, 1500, 1500), "order roll, pitch, throttle, yaw"
+A = config.BF_AUX_US                                                # BETAFLIGHT CHANGE: AUX "off" (1000), not 1500
+assert struct.unpack("<8H", f[5:-1]) == (1500, 1490, 1300, 1500, A, A, A, A), "order roll, pitch, throttle, yaw"
 for gps in (106, 107, 164, 166):                                    # MSP_RAW_GPS, COMP_GPS, GPSSVINFO, GPSSTATISTICS
     try:
         msp.request(gps)
@@ -172,16 +173,19 @@ fc.rc[9] = 1000
 t = run(s, t, 0.1)
 
 print("\nTest 5: the lean is capped twice (controller, then sender)")
-most = 500 * config.BF_MAX_TILT_DEG / config.BF_ANGLE_LIMIT_DEG
+# BETAFLIGHT CHANGE: the cap is in DEGREES of real lean, through Betaflight's own stick curve (link/stick_curve.py)
+lean = lambda us: abs(stick_curve.angle_from_us(us))
+most = config.BF_MAX_TILT_DEG + 0.1
 roll, pitch = pc.sticks(50.0, -50.0, 0.0, 0.0)                      # 50 m away: still only BF_MAX_TILT_DEG
-assert abs(roll - 1500) <= most + 1 and abs(pitch - 1500) <= most + 1
+assert lean(roll) <= most and lean(pitch) <= most
 fc.rc[9] = 2000
 t = run(s, t, 0.1)
 s.set_target(1000, 2000, t)                                         # something asks for full stick
 s.step(t)
 r, pch = fc.sticks()[:2]
-assert abs(r - 1500) <= most + 1 and abs(pch - 1500) <= most + 1 and r > 1000 and pch < 2000
-print(f"  asked for (1000, 2000), sent ({r}, {pch}): at most {config.BF_MAX_TILT_DEG:g} deg of {config.BF_ANGLE_LIMIT_DEG:g}")
+assert lean(r) <= most and lean(pch) <= most and r > 1000 and pch < 2000 and lean(r) > config.BF_MAX_TILT_DEG - 0.2
+print(f"  asked for (1000, 2000), sent ({r}, {pch}) = {lean(r):.1f} deg of real lean "
+      f"(cap {config.BF_MAX_TILT_DEG:g} deg, Betaflight curve, angle_limit {config.BF_ANGLE_LIMIT_DEG:g})")
 
 print("\nTest 6: throttle = pilot's value at engage, nudged to hold the engage height, bounded")
 fc2, baro2 = FakeFC(), FakeBaro()
@@ -326,12 +330,12 @@ print("  radio off (arm channel 1775) but FC says disarmed: bench height used; F
 
 print("\nTest 10: nothing we ever sent asked for GNSS (Stage 2 section 04)")
 commands = {c for port in (fc, fc2, s3.port) for c, _ in port.sent}
-print(f"  MSP commands sent in this whole test: {sorted(commands)} (200 sticks, 108 tilt, 105 radio channels)")
-assert commands - {msp.MSP_STATUS} == {msp.MSP_SET_RAW_RC, msp.MSP_ATTITUDE, msp.MSP_RC}   # 101 = armed or not
+print(f"  MSP commands sent in this whole test: {sorted(commands)} (200 sticks, 108 tilt, 105 radio channels, 102 raw IMU, 101 armed)")
+assert commands - {msp.MSP_STATUS} == {msp.MSP_SET_RAW_RC, msp.MSP_ATTITUDE, msp.MSP_RC, msp.MSP_RAW_IMU}
 for port in (fc, fc2, s3.port):
     for c, payload in port.sent:
         if c == msp.MSP_SET_RAW_RC:
             r, pch, thr, yaw = struct.unpack("<8H", payload)[:4]
             assert yaw == 1500 and config.BF_THROTTLE_MIN <= thr <= config.BF_THROTTLE_MAX
-            assert abs(r - 1500) <= most + 1 and abs(pch - 1500) <= most + 1, "never anywhere near minimum values"
+            assert lean(r) <= most and lean(pch) <= most, "never anywhere near minimum values"
 print("\nALL BETAFLIGHT TESTS PASSED (simulated flight controller: confirm signs on the real aircraft)")

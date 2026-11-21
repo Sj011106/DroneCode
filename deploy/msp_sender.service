@@ -32,6 +32,12 @@ ExecStart=@DIR@/venv/bin/python -m link.msp_sender
 Restart=always
 RestartSec=0.2
 Nice=-15
+# BETAFLIGHT CHANGE: if the sender ever HANGS (not crashes), Betaflight would fly our last command for ever.
+# The sender says "still alive" every 20 ms; after 2 s of silence systemd kills and restarts it.
+WatchdogSec=2
+NotifyAccess=main
+# BETAFLIGHT CHANGE: its own core, so the vision program can never starve it
+CPUAffinity=0
 
 [Install]
 WantedBy=multi-user.target

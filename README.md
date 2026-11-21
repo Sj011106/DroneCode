@@ -10,6 +10,11 @@ switch** (CH10), and from that moment our code holds the position until the pilo
 > aircraft ships with. The ArduCopter route stays in the code as an unused fallback (`--fc ardupilot`).
 > **Every number in this file is simulated.** Nothing has run on the real aircraft or the APB yet.
 > What must be checked on the real hardware first is listed in [section 9](#9-status-and-what-is-still-open).
+>
+> **Betaflight changes (21 Nov, local copy, not pushed):** Betaflight's real stick curve, an I term that starts at
+> the pilot's lean, heading from the camera (Betaflight's heading is GPS-corrected), AUX off, engage hysteresis,
+> a sender watchdog, bench protection against the holder's legs, optional height from motion, a heat guard.
+> What changed, why, and what to check on the aircraft: [docs/BETAFLIGHT_CHANGES.md](docs/BETAFLIGHT_CHANGES.md).
 
 ---
 
