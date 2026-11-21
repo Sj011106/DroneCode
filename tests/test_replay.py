@@ -103,7 +103,9 @@ on = np.mean(error_cm(runs["all fixes ON"]))
 assert np.mean(error_cm(runs["tilt fix OFF"])) > 3 * on, "turning the tilt fix off should hurt a lot"
 # Without the RS fix the warp makes health.py reject many frames (fewer trusted frames);
 # the frames it still trusts are the calm ones, so their error stays similar.
-assert len(error_cm(runs["rolling-shutter fix OFF"])) < 0.8 * len(error_cm(runs["all fixes ON"])), \
+# STAGE 2: levelling (config.USE_LEVEL_POINTS) rotates points with the mid-frame attitude even when the RS fix
+# is off, which removes part of the warp, so the loss is smaller than before (was < 0.8).
+assert len(error_cm(runs["rolling-shutter fix OFF"])) < 0.9 * len(error_cm(runs["all fixes ON"])), \
     "turning the RS fix off should cost trusted frames"
 
 # ---------------- Test 2: live run with --record, then replay ----------------
@@ -155,7 +157,8 @@ real_link = vision_hold.DroneLink
 vision_hold.DroneLink = FakeLink
 live_dir = os.path.join(tmp, "rec_live")
 live_log = os.path.join(tmp, "live.csv")
-vision_hold.main(["--camera", video, "--trigger", "start", "--record", live_dir, "--log", live_log,
+vision_hold.main(["--fc", "ardupilot",                        # STAGE 2: this live run uses the MAVLink FakeLink
+                  "--camera", video, "--trigger", "start", "--record", live_dir, "--log", live_log,
                   "--no-gps-fallback"])                         # rolling-shutter fix ON
 vision_hold.DroneLink = real_link
 live = read_log(live_log)

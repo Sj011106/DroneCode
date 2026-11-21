@@ -115,6 +115,10 @@ print(f"  random roll+pitch, {sig} deg each, 40 m: measured {100 * got:.1f} cm R
 assert abs(got / want - 1) < 0.05
 
 print("\nTest 4: advice and the closed-form ceiling (placeholder limits RMS 0.5 m, max 1.0 m, margin 1.5)")
+# STAGE 2: config.py now holds the official limits (3 m, no RMS limit). This test checks the FORMULA, so it
+# puts the old placeholder limits back for its own duration and restores the official ones afterwards.
+official = (config.HOLD_RMS_DRIFT_M, config.HOLD_MAX_DRIFT_M, config.HOLD_LIMITS_OFFICIAL)
+config.HOLD_RMS_DRIFT_M, config.HOLD_MAX_DRIFT_M, config.HOLD_LIMITS_OFFICIAL = 0.5, 1.0, False
 safe = ce.max_safe_height(0.75, 208.0, 0.5)
 print(f"  quality 90 on the Justice D (focal ~208 px at 640 wide), 0.5 deg tilt: max safe height {safe:.1f} m")
 assert abs(safe - 1.0 / (1.5 * 3 * ce.k_factor(0.75, 208.0, 0.5))) < 1e-9
@@ -127,6 +131,10 @@ for h, want_word in ((5.0, "CLIMB OK"), (12.0, "STAY"), (30.0, "ABOVE CEILING"))
     print(f"  at {h:4.0f} m -> {a.advice}")
     assert a.advice.startswith(want_word), a.advice
 assert "PLACEHOLDER" in a.message() and "max safe height" in a.message()
+config.HOLD_RMS_DRIFT_M, config.HOLD_MAX_DRIFT_M, config.HOLD_LIMITS_OFFICIAL = official
+real = ce.max_safe_height(0.75, 208.0, 0.5)
+print(f"  with the official Stage 2 limit ({config.HOLD_MAX_DRIFT_M:g} m): max safe height {real:.1f} m")
+assert abs(real - config.HOLD_MAX_DRIFT_M / (1.5 * 3 * ce.k_factor(0.75, 208.0, 0.5))) < 1e-9
 
 print("\nTest 5: it only watches - ODOMETRY identical with the advisor ON and OFF")
 import tools.replay as replay_mod

@@ -14,7 +14,14 @@
 #   python vision_hold.py --camera 1              -> a different camera
 #   python vision_hold.py --camera video.mp4      -> a recorded video (played in real time)
 #   python vision_hold.py --show                  -> also show a preview window
-#   python vision_hold.py --fixed-height 0.5      -> bench test: webcam 0.5 m above a table
+#   python vision_hold.py --fc betaflight         -> STAGE 2: fly the stock Betaflight firmware (sticks over MSP;
+#                                                    start link/msp_sender.py first, see deploy/)
+#   python vision_hold.py --fixed-height 1.0      -> bench test: the camera is 1.0 m above the floor when
+#                                                    home is saved (height changes are then read from how
+#                                                    much smaller/bigger the floor looks)
+# STAGE 2 BENCH (judge carries the aircraft, our laptop shows the estimate):
+#   watch the estimate:      journalctl -u vision_hold -f        (READY / NOT READY lines, 5 per second)
+#   zero at the start mark:  systemctl kill -s USR1 vision_hold  (saves a new home right here)
 #
 # Autopilot settings this expects (source set 2 = our vision, set 1 = GPS):
 #   VISO_TYPE = 1, EK3_SRC2_POSXY = 6 (ExternalNav), EK3_SRC2_POSZ = 1 (Baro),
@@ -51,6 +58,7 @@ import numpy as np
 from vision.tracker import load_calibration, to_north_east
 from health.health import HealthChecker
 from link.drone_link import DroneLink, SRC_GPS, SRC_VISION
+from link.betaflight_link import BetaflightLink              # STAGE 2: the firmware the aircraft ships with
 from pymavlink import mavutil
 
 # NEW (added on top of Saumya's pipeline; each one can be switched off in config.py):
@@ -128,9 +136,11 @@ def main(argv=None):                                             # NEW: argv for
     ap = argparse.ArgumentParser(description="Automatic vision position hold")
     ap.add_argument("--connect", default=CONNECTION)
     ap.add_argument("--camera", default="0", help="camera number or video file")
+    ap.add_argument("--fc", default=None, choices=["ardupilot", "betaflight"],   # STAGE 2
+                    help="flight controller route (default: config.FC). betaflight needs link/msp_sender.py running")
     ap.add_argument("--trigger", default=HOME_TRIGGER, choices=["mode", "rc", "start"])
     ap.add_argument("--fixed-height", type=float, default=None,
-                    help="bench test only: pretend the camera is this many metres up")
+                    help="bench test only: the camera is this many metres above the floor when home is saved")
     ap.add_argument("--no-gps-fallback", action="store_true")
     ap.add_argument("--practice", action="store_true",           # NEW (Ayush A1)
                     help="practice only: allow the GPS fallback (NEVER for the scored trial)")
@@ -152,10 +162,14 @@ def main(argv=None):                                             # NEW: argv for
         print(f"config.{name} = {getattr(config, name)!r}")
     trial = trial_mode.from_args(args)                           # NEW (Ayush A1): sets --no-gps-fallback
     signal.signal(signal.SIGTERM, _stop_on_sigterm)              # NEW: 'systemctl stop' -> safe shutdown
+    zero_here = []                                               # STAGE 2 bench: "zero at the start mark"
+    if hasattr(signal, "SIGUSR1"):                               # (Linux only) systemctl kill -s USR1 vision_hold
+        signal.signal(signal.SIGUSR1, lambda *_: zero_here.append(1))
     replay = Replay(args.replay) if args.replay else None        # NEW
     clock = replay.clock if replay else time.time                # NEW: recorded time during replay
 
-    link = replay.link if replay else DroneLink(args.connect)    # NEW: replay link
+    betaflight = (args.fc or config.FC) == "betaflight" and not replay   # STAGE 2
+    link = replay.link if replay else (BetaflightLink() if betaflight else DroneLink(args.connect))   # NEW: replay link
     trial.guard(link)                                            # NEW (Ayush A1): drops any "use GPS" command
     link.start()
     link.check_params()
@@ -180,7 +194,8 @@ def main(argv=None):                                             # NEW: argv for
     timing = load_timing()
     print(f"Rolling shutter: {'ON' if config.USE_ROLLING_SHUTTER else 'OFF'}, {timing}")
     tracker = RollingShutterTracker(K, dist, attitude_history=link.attitudes, timing=timing,
-                                    enabled=config.USE_ROLLING_SHUTTER)   # NEW: explicit, so --set works
+                                    enabled=config.USE_ROLLING_SHUTTER,   # NEW: explicit, so --set works
+                                    level=config.USE_TILT and config.USE_LEVEL_POINTS)   # STAGE 2: wide-lens tilt fix
     health = HealthChecker()
     if getattr(config, "USE_FEATURE_FILTER", False):             # Saumya: ignore props/OSD (mask.png)
         from vision.feature_filter import attach
@@ -200,13 +215,20 @@ def main(argv=None):                                             # NEW: argv for
     fallback = FALLBACK_TO_GPS and not args.no_gps_fallback
 
     handover = Handover(hold_modes=HOLD_MODES, failsafe_after_s=config.FAILSAFE_AFTER_S,
-                        failsafe_mode=config.FAILSAFE_ACTION,
+                        # STAGE 2: Betaflight has no LAND to command; not ready = centred sticks (msp_sender)
+                        failsafe_mode="NONE" if betaflight else config.FAILSAFE_ACTION,
                         max_sends=config.FAILSAFE_MODE_RETRIES)
     auto_reanchor = AutoReanchor(config.AUTO_REANCHOR_AFTER_S)
     # Part D: handover timers run on a monotonic clock, so a wall-clock correction (the APB's time is wrong until
     # NTP, APB manual p.10) cannot jump the failsafe timer. A replay uses its recorded time.
     hclock = replay.clock if replay else time.monotonic
     home_height = None                                       # Part D: height when HOME was saved (scale reference)
+    # STAGE 2 bench: the FIRST home picture (tracker state, attitude, height) so we can measure against it again
+    # when it comes back into view; at_origin = the tracker's reference IS that first picture right now.
+    origin, at_origin, frame_i, last_status = None, True, 0, 0.0
+    bench_height = args.fixed_height                         # STAGE 2 bench: height now, from the picture's scale
+    from link.apb_sensors import Gyro                        # STAGE 2 bench step 1: the APB's own IMU, read in
+    apb_gyro = Gyro()                                        # THIS process (None-safe off the board)
 
     def act_on(actions):
         """Do what handover.py asked. Returns True if it asked for a new HOME (REANCHOR)."""
@@ -276,12 +298,14 @@ def main(argv=None):                                             # NEW: argv for
                 if t_capture - last_frame_ok > 5.0 and t_capture - last_cam_warn >= 5.0:
                     print("Camera lost - sending no-position to autopilot; check the camera.")
                     last_cam_warn = t_capture
-                if home_saved:                                   # tell the autopilot: no data
+                if home_saved and (betaflight or not config.ARDUPILOT_SILENT_WHEN_NOT_READY):   # tell the autopilot: no data
                     att = link.attitude_at(t_capture) or (0.0, 0.0, 0.0)
                     link.send_odometry(t_capture, 0.0, 0.0, 0.0, att, (0, 0, 0), -1, reset_counter)
                 time.sleep(0.05)
                 continue
             last_frame_ok = t_capture
+            if config.CAMERA_UPSIDE_DOWN:                        # STAGE 2: camera mounted the other way round
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
             small = downscale(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))   # NEW: PROCESS_WIDTH (APB CPU)
             gray = enhance(small)                                # NEW: enhance() = contrast boost
             if not k_scaled:                                     # NEW: lens K for the processed size
@@ -296,9 +320,14 @@ def main(argv=None):                                             # NEW: argv for
             tracker.history = atts                               # thread-safe, and replay sees exactly this
             prof.lap("grab")                                     # NEW
 
+            # STAGE 2 bench: no --fixed-height needed on the Betaflight route. Disarmed (props off, judge carrying
+            # the aircraft) -> the link says "bench height"; armed -> None -> the barometer height is used.
+            fixed_height = args.fixed_height or (link.bench_height() if betaflight else None)
+
             # ---------- 2. Home trigger (replaces 'r') ----------
-            fired = trigger.fired(link) or reanchor_request      # Part D: engage re-anchor is recorded too
-            reanchor_request = False
+            fired = trigger.fired(link) or reanchor_request or bool(zero_here)   # Part D: engage re-anchor is
+            reanchor_request = False                             # recorded too. STAGE 2: so is "zero here"
+            zero_here.clear()
             if recorder:                                         # NEW: record raw inputs
                 recorder.add(small, t_capture, fired, link.height(t_capture), atts,
                              orig_size=(frame.shape[1], frame.shape[0]))
@@ -311,10 +340,12 @@ def main(argv=None):                                             # NEW: argv for
                     health.reset()
                     home_att = attitude_near(atts, t_frame)   # NEW: tilt + IMU check (thread-safe)
                     imu_check.set_home(home_att[2] if home_att else None)
-                    recovery.set_home(gray)                      # NEW: fingerprints for re-finding home
+                    recovery.set_home(gray, origin=True)         # NEW: fingerprints for re-finding home
                     rehome.reset()                               # NEW: positions count from THIS home
                     home_saved, home_pending = True, False
-                    home_height = link.height(t_capture)         # Part D: scale reference for AutoReanchor
+                    home_height = fixed_height or link.height(t_capture)   # Part D: scale reference for AutoReanchor
+                    bench_height = fixed_height
+                    origin, at_origin = dict(ref=dict(tracker.__dict__), att=home_att, height=home_height), True
                     reset_counter = (reset_counter + 1) % 256    # tells the EKF "position jumped to 0"
                     prev_ne, vel_ned = None, np.zeros(3)
                     print(f"HOME saved automatically ({n} corners, trigger '{args.trigger}')")
@@ -324,6 +355,9 @@ def main(argv=None):                                             # NEW: argv for
             if old_ref is not None and home_pending:             # NEW: new home failed (poor texture):
                 tracker.__dict__.update(old_ref)                 # keep tracking the OLD home meanwhile
             if not home_saved:
+                if config.STATUS_LINE_HZ and not replay and t_capture - last_status >= 1.0:
+                    last_status = t_capture
+                    print("NOT READY  no home picture yet (not enough ground texture)", flush=True)
                 continue
 
             # ---------- 3. Measure + judge ----------
@@ -331,12 +365,21 @@ def main(argv=None):                                             # NEW: argv for
             att = att_real or (0.0, 0.0, 0.0)                    # NEW
             if home_att is None and att_real:                    # NEW: home saved before IMU data arrived:
                 home_att = att_real                              # use the first attitude (approximation)
+                if at_origin:
+                    origin["att"] = att_real
             res = tracker.track(gray, t_capture, attitude=att)
             prof.lap("track")                                    # NEW
             rep = health.check(gray, res)
             prof.lap("health")                                   # NEW
-            height = args.fixed_height if args.fixed_height else link.height(t_capture)
-            if not args.fixed_height and config.USE_HEIGHT_FILTER:   # NEW: smooth, ignore spikes
+            if fixed_height and config.BENCH_HEIGHT_FROM_SCALE:
+                # STAGE 2 bench: no rangefinder and the judge raises the aircraft. --fixed-height is the height
+                # where the reference was saved; the floor looking smaller/bigger gives the height now.
+                if res.ok:
+                    bench_height = (home_height or fixed_height) / res.scale
+                height = bench_height or fixed_height
+            else:
+                height = fixed_height if fixed_height else link.height(t_capture)
+            if not fixed_height and config.USE_HEIGHT_FILTER:   # NEW: smooth, ignore spikes
                 height = height_filter.update(t_capture, height)
             quality = rep.quality
             if height is None or height < MIN_HEIGHT_M:
@@ -363,7 +406,11 @@ def main(argv=None):                                             # NEW: argv for
             # NEW: remove the fake shift caused by roll/pitch
             shift = res.shift_px
             if config.USE_TILT and res.ok and att_real and home_att:
-                shift = cancel_tilt(res.shift_px, att_real, home_att, tracker.focal_px, res.rotation_deg)
+                # STAGE 2: a side whose points the tracker already levelled with the IMU (USE_LEVEL_POINTS) has
+                # no tilt shift left: give cancel_tilt roll = pitch = 0 for that side.
+                a_now = (0.0, 0.0, att_real[2]) if tracker.now_levelled else att_real
+                a_home = (0.0, 0.0, home_att[2]) if tracker.ref_levelled else home_att
+                shift = cancel_tilt(res.shift_px, a_now, a_home, tracker.focal_px, res.rotation_deg)
             prof.lap("fusion")                                   # NEW
 
             north = east = float("nan")
@@ -377,20 +424,65 @@ def main(argv=None):                                             # NEW: argv for
                 prev_ne = (north, east, t_capture)
 
             # NEW: climbed/descended ~15% -> new reference picture here, position stays continuous
-            if config.USE_REHOME and quality > 0 and att_real and rehome.due(rep.status, res):
+            # STAGE 2 bench: also when the picture slid sideways by REHOME_SHIFT_FRAC of its width (1.5 m carry at 1 m)
+            if config.USE_REHOME and quality > 0 and att_real and rehome.due(rep.status, res, gray.shape[1::-1]):
                 if rehome.rehome(tracker, health, gray, t_capture, north, east, MIN_HOME_CORNERS):
                     home_att = att_real
-                    home_height = height                         # Part D: new scale reference
+                    if not (fixed_height and rehome.scale_min <= res.scale <= rehome.scale_max):
+                        home_height = height                     # Part D: new scale reference. (STAGE 2 bench: a
+                        # switch caused by sliding keeps the old height, or scale noise would pile up per switch)
                     imu_check.set_home(att_real[2])              # rotation restarts at 0 here
                     recovery.set_home(gray)
+                    at_origin = False
                     print(f"Re-homed at {height:.1f} m (#{rehome.count}), offset N={north:+.2f} E={east:+.2f}")
+
+            # STAGE 2 bench (steps 2-3 + recovery bonus), two additions around the re-home above:
+            frame_i += 1
+            # (a) Blind for a while and nothing we know is in view (the camera was covered while the aircraft was
+            #     carried on): take a new reference HERE and keep counting from the last trusted position. Never
+            #     while the pilot is holding on us: there, LOST must stay LOST (failsafe, handover.py).
+            if (config.USE_REHOME and config.LOST_KEYFRAME_AFTER_S and rep.status == "LOST" and not handover.engaged
+                    and prev_ne is not None and t_capture - prev_ne[2] > config.LOST_KEYFRAME_AFTER_S
+                    and att_real and height is not None and frame_i % 5 == 0):
+                if rehome.rehome(tracker, health, gray, t_capture, prev_ne[0], prev_ne[1], MIN_HOME_CORNERS):
+                    home_att, home_height, at_origin = att_real, height, False
+                    imu_check.set_home(att_real[2])
+                    recovery.set_home(gray)
+                    prev_ne, vel_ned = (prev_ne[0], prev_ne[1], t_capture), np.zeros(3)
+                    print(f"LOST for {config.LOST_KEYFRAME_AFTER_S:g} s with nothing known in view: new reference here, "
+                          f"position continues from N={prev_ne[0]:+.2f} E={prev_ne[1]:+.2f}")
+            # (b) The reference is a later picture and the FIRST home picture is in view again: measure against it
+            #     again. Whatever drift the chain of references collected on the way is gone.
+            if (config.USE_ORIGIN_RETURN and origin and not at_origin and att_real
+                    and frame_i % config.ORIGIN_CHECK_EVERY_N == 0):
+                M = recovery.find_origin(gray)
+                if M is not None:                                # where we are vs the first home, in pixels
+                    cx, cy = origin["ref"]["centre"]
+                    back = (float(cx - (M[0, 0] * cx + M[0, 1] * cy + M[0, 2])),
+                            float(cy - (M[1, 0] * cx + M[1, 1] * cy + M[1, 2])))
+                    # only when well inside the re-home distance, or the two switches would take turns
+                    if math.hypot(*back) > 0.5 * (config.REHOME_SHIFT_FRAC or 0.25) * gray.shape[0]:
+                        M = None
+                if M is not None:
+                    tracker.__dict__.update(origin["ref"])       # set_reference reassigns, never mutates
+                    tracker.relock(M)
+                    recovery.use_origin()
+                    rehome.to_origin()
+                    home_att, home_height, at_origin = origin["att"], origin["height"], True
+                    imu_check.set_home(home_att[2] if home_att else None)
+                    health.prev_shift, health.prev_shift_t = back, t_capture   # health's jump check starts here
+                    prev_ne = None                               # the position may step: no fake velocity from it
+                    print("First home picture is in view again: measuring against it (drift removed)")
 
             # ---------- 4. Send to the autopilot ----------
             down = link.local_z[1] if link.local_z else 0.0      # ignored: height source is Baro
             send_n, send_e = (north, east) if quality > 0 else (0.0, 0.0)
-            link.send_odometry(t_capture, send_n, send_e, down, att,
-                               ned_to_body(vel_ned, *att), quality, reset_counter,
-                               metres_per_px=height / tracker.focal_px if quality > 0 else None)   # NEW
+            # STAGE 2 (bench steps 6-7): not ready on ArduCopter = "receives no position" -> send nothing at all.
+            # Betaflight always gets the call: its link turns "not ready" into centred sticks.
+            if quality > 0 or betaflight or not config.ARDUPILOT_SILENT_WHEN_NOT_READY:
+                link.send_odometry(t_capture, send_n, send_e, down, att,
+                                   ned_to_body(vel_ned, *att), quality, reset_counter,
+                                   metres_per_px=height / tracker.focal_px if quality > 0 else None)   # NEW
             prof.lap("send")                                     # NEW
             monitors.frame(t_capture, height, tracker.focal_px, quality, north, east,   # NEW (Ayush A4/A5):
                            rep.status, reset_counter)            # after the send; can't change it
@@ -435,6 +527,20 @@ def main(argv=None):                                             # NEW: argv for
                           f"{imu_err:.2f}", recovery.relocks,
                           *(f"{ms.get(s, 0.0):.2f}" for s in ("grab", "track", "health", "fusion", "send", "total")),
                           rehome.count])
+            # STAGE 2 bench: "your laptop shows your live estimate". forward/right are along the aircraft's nose
+            # as it pointed when home was saved.
+            if config.STATUS_LINE_HZ and not replay and t_capture - last_status >= 1.0 / config.STATUS_LINE_HZ:
+                last_status = t_capture
+                g = apb_gyro.rates()
+                imu = "" if g is None else f"   imu gyro {g[0]:+.2f} {g[1]:+.2f} {g[2]:+.2f} rad/s"
+                if quality > 0:
+                    yaw0 = origin["att"][2] if origin["att"] else att[2]
+                    fwd, right = (north * math.cos(yaw0) + east * math.sin(yaw0),
+                                  -north * math.sin(yaw0) + east * math.cos(yaw0))
+                    print(f"READY      distance {math.hypot(north, east):5.2f} m   forward {fwd:+5.2f}   right {right:+5.2f}"
+                          f"   height change {height - (origin['height'] or height):+5.2f} m   q={quality}{imu}", flush=True)
+                else:
+                    print(f"NOT READY  {rep.status}: {'; '.join(rep.reasons) or 'no height'}{imu}", flush=True)
             if is_camera:                                        # NEW: fell behind -> drop stale frames
                 for _ in range(budget.frames_to_drop(time.time() - t_capture, t_capture - t_read)):
                     cap.grab()
@@ -451,7 +557,7 @@ def main(argv=None):                                             # NEW: argv for
     finally:
         # ---------- Safe shutdown (replaces 'q') ----------
         print("Shutting down safely...")
-        if home_saved:
+        if home_saved and (betaflight or not config.ARDUPILOT_SILENT_WHEN_NOT_READY):
             att = link.attitude_at(time.time()) or (0.0, 0.0, 0.0)
             for _ in range(5):                                   # "our data is no longer valid"
                 link.send_odometry(time.time(), 0.0, 0.0, 0.0, att, (0, 0, 0), -1, reset_counter)

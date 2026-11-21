@@ -12,7 +12,7 @@
 # COMMANDS (from the repo root)
 #   python -m calibration.check_calib                       -> check calib.npz
 #   python -m calibration.check_calib --camera /dev/video2  -> ...and that it matches the camera
-#   python -m calibration.check_calib --write-spec          -> datasheet calib.npz (1280x720)
+#   python -m calibration.check_calib --write-spec          -> datasheet calib.npz (1920x1080)
 #   python -m calibration.check_calib --write-spec --force  -> overwrite an existing one
 # Exit code 0 = PASS, 1 = FAIL (so it can be used in a pre-flight script).
 # =====================================================================================
@@ -27,7 +27,7 @@ import numpy as np
 
 from vision.tracker import DEFAULT_HFOV_DEG, calibration_size, focal_from_fov
 
-SPEC_W, SPEC_H = 1280, 720        # Justice D datasheet: fixed 1280x720 @ 60 fps
+SPEC_W, SPEC_H = 1920, 1080       # Stage 2: the Justice D delivers 1920x1080 @ 60 fps (datasheet said 1280x720)
 FOCAL_TOLERANCE = 0.15            # margin around the normal-lens..fisheye focal range
 CENTRE_TOLERANCE = 0.10           # optical centre within 10% of the image middle
 

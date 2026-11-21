@@ -8,9 +8,9 @@
 #   the service would grab the camera and the flight-controller port and fight every
 #   manual test. Enable it only for event day (docs/WORKLIST.md phase 4):
 #       sudo systemctl enable --now vision_hold
-#   APB values (DTK APB User Manual v1.7.2): flight controller = /dev/ttymxc2 (UART3),
-#   reachable only after the two gpioset commands below (p.14); Justice D = /dev/video2,
-#   given as --camera 2 (= /dev/video2).
+#   APB values (Stage 2 package): flight controller = /dev/ttymxc2, Justice D = /dev/video2,
+#   given as --camera 2 (= /dev/video2). NO gpioset here: Stage 2 forbids changing the APB
+#   GPIO lines (they route the FC link and the pilot video). Link silent? Ask the organisers.
 #   Add --record to ExecStart for practice flights (saves to /sdcard when a card is in).
 #
 # Useful commands on the board:
@@ -24,19 +24,21 @@
 
 [Unit]
 Description=Vision position hold (GNSS-denied)
-After=network.target
+After=network.target msp_sender.service
 
 [Service]
 User=@USER@
 WorkingDirectory=@DIR@
-# --no-gps-fallback: GNSS is jammed/spoofed in the trial; switching back to it could fly away.
-# Route UART3 (/dev/ttymxc2) to the flight controller first (APB manual p.14):
-ExecStartPre=/usr/bin/env gpioset -t0 -c gpiochip3 13=1
-ExecStartPre=/usr/bin/env gpioset -t0 -c gpiochip3 0=0
-ExecStart=@DIR@/venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --no-gps-fallback
+Environment=PYTHONUNBUFFERED=1
+# --no-gps-fallback: no GNSS may aid the hold (Stage 2 section 04).
+# BETAFLIGHT (the firmware the aircraft ships with): sticks go through the msp_sender service, which owns
+# /dev/ttymxc2. Enable both:  systemctl enable --now msp_sender vision_hold
+ExecStart=@DIR@/venv/bin/python vision_hold.py --fc betaflight --camera 2 --no-gps-fallback
+# ARDUCOPTER instead (only if the team flashed it): use this line and do NOT enable msp_sender:
+#ExecStart=@DIR@/venv/bin/python vision_hold.py --fc ardupilot --connect /dev/ttymxc2 --camera 2 --no-gps-fallback
 # always: also restart after a clean exit (e.g. "Camera lost for 5 s - stopping.")
 Restart=always
-RestartSec=2
+RestartSec=1
 Nice=-10
 
 [Install]

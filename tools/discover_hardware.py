@@ -19,23 +19,21 @@
 #   port corrupt each other's messages. The tool refuses to scan while vision_hold runs.
 #
 # APB FACTS (DTK APB User Manual v1.7.2)
-#   - Flight-controller link = /dev/ttymxc2 (UART3), behind an internal switch that must be
-#     set first (p.14):  gpioset -t0 -c gpiochip3 13=1 ; gpioset -t0 -c gpiochip3 0=0
-#     --route-fc-uart runs exactly those two commands (never done by default).
-#   - Justice D on CSI-1 = /dev/video2 (CSI-2 = /dev/video3), fixed 1280x720@60, no exposure
+#   - Flight-controller link = /dev/ttymxc2 (UART3). Stage 2: 230400 baud MAVLink 2 (ArduCopter)
+#     or 115200 MSP (Betaflight). NEVER run gpioset: Stage 2 forbids changing the APB GPIO lines.
+#   - Justice D on CSI-1 = /dev/video2 (CSI-2 = /dev/video3), fixed 1920x1080@60 YUYV (Stage 2), no exposure
 #     or gain control (p.12). vision_hold.py: --camera 2 (same as --camera /dev/video2).
 #   - ICM42605 IMU + DPS310 barometer sit on the i.MX side (p.5); thermal shutdown at 95 C (p.11).
 #
 # HOW IT WORKS (technical)
 #   Linux /proc and /sys for CPU/RAM, /etc/os-release, glob /dev/video* and opens each
 #   with cv2.CAP_V4L2, glob /dev/tty{mxc,S,AMA,USB,ACM}* and tries pymavlink
-#   wait_heartbeat at 921600/115200/57600/1500000 baud. ArduPilot version from the
+#   wait_heartbeat at 230400/921600/115200/57600/1500000 baud. ArduPilot version from the
 #   AUTOPILOT_VERSION message (requested with MAV_CMD_REQUEST_MESSAGE, read-only).
 #   On Windows/macOS it runs the parts that make sense (for testing on a laptop).
 #
 # HOW TO RUN (from the repo root, on the APB)
 #   venv/bin/python -m tools.discover_hardware                  # everything (~1-2 min)
-#   venv/bin/python -m tools.discover_hardware --route-fc-uart  # first set the FC UART switch
 #   venv/bin/python -m tools.discover_hardware --no-serial      # skip the serial-port scan
 #
 # REFERENCES
@@ -55,11 +53,9 @@ import subprocess
 import sys
 import time
 
-BAUDS = (921600, 115200, 57600, 1500000)
+BAUDS = (230400, 921600, 115200, 57600, 1500000)   # 230400 = Stage 2 ArduCopter link
 SERIAL_PATTERNS = ("/dev/ttymxc2", "/dev/ttymxc*", "/dev/ttyS*", "/dev/ttyAMA*", "/dev/ttyUSB*",
                    "/dev/ttyACM*", "/dev/serial/by-id/*")      # APB FC link (ttymxc2) first
-FC_UART_ROUTE = (["gpioset", "-t0", "-c", "gpiochip3", "13=1"],   # APB manual p.14: SW1 = 1
-                 ["gpioset", "-t0", "-c", "gpiochip3", "0=0"])    #                  SW0 = 0
 
 
 def section(title):
@@ -181,19 +177,6 @@ def vision_hold_running():
     return False
 
 
-def route_fc_uart():
-    """APB manual p.14: switch UART3 (/dev/ttymxc2) to the flight controller."""
-    section("Routing /dev/ttymxc2 to the flight controller (APB manual p.14)")
-    for cmd in FC_UART_ROUTE:
-        print("  $ " + " ".join(cmd))
-        if not shutil.which(cmd[0]):
-            print("  gpioset not found - is this the APB?")
-            return
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode:
-            print(f"  failed: {r.stderr.strip()}")
-
-
 def serial_ports(timeout_s=2.5):
     section("Serial ports / flight controller")
     try:
@@ -247,7 +230,7 @@ def serial_ports(timeout_s=2.5):
         else:
             print(f"  {port}: no MAVLink heartbeat at {', '.join(map(str, BAUDS))}")
     if not hits and "/dev/ttymxc2" in ports:
-        print("  Hint: on the APB the FC link is /dev/ttymxc2 behind a switch: rerun with --route-fc-uart")
+        print("  Hint: no MAVLink on /dev/ttymxc2 is normal while the FC runs Betaflight (it speaks MSP).")
     return hits
 
 
@@ -274,15 +257,11 @@ def main():
     ap = argparse.ArgumentParser(description="Find out what hardware this computer has")
     ap.add_argument("--no-serial", action="store_true")
     ap.add_argument("--no-camera", action="store_true")
-    ap.add_argument("--route-fc-uart", action="store_true",
-                    help="APB only: run the two gpioset commands that connect /dev/ttymxc2 to the FC")
     args = ap.parse_args()
 
     computer()
     libraries()
     board()
-    if args.route_fc_uart:
-        route_fc_uart()
     cams = [] if args.no_camera else cameras()
     fcs = [] if args.no_serial else serial_ports()
 
@@ -298,15 +277,15 @@ def main():
         if "ARDUPILOT" not in autopilot:
             print(f"  WARNING: it runs {autopilot}. Team decision: ArduPilot >= 4.5 only -> ask the")
             print("  organisers for the event's ArduPilot build for the APB flight controller.")
-        if baud != 921600:
-            print(f"  NOTE: our link opens serial ports at 921600 baud but the autopilot answered at"
-                  f" {baud}: set that serial port's SERIALx_BAUD = 921 on the autopilot.")
+        if baud != 230400:
+            print(f"  NOTE: our link opens serial ports at 230400 baud but the autopilot answered at"
+                  f" {baud}: set that serial port's SERIALx_BAUD = 230 on the autopilot.")
         print(f"  Firmware {version}: GPS param name is GPS_TYPE up to 4.5, GPS1_TYPE from 4.6"
               " (ardupilot/vision_hold.param section 7).")
         print(f"  Next: venv/bin/python -m link.check_link --connect {port}")
     elif not args.no_serial:
-        print("  Flight controller: not found. On the APB: rerun with --route-fc-uart (FC link is")
-        print("  /dev/ttymxc2 behind a switch), and check the autopilot's SERIALx_PROTOCOL = 2 (MAVLink 2).")
+        print("  Flight controller: no MAVLink found. Normal with Betaflight (MSP). With ArduCopter: check")
+        print("  SERIALx_PROTOCOL = 2 (MAVLink 2) and 230400 baud. Do NOT run gpioset (Stage 2 rule).")
     print("  Benchmark this computer: venv/bin/python -m compute.benchmark")
 
 

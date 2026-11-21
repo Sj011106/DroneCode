@@ -21,6 +21,10 @@
 #     the same frame Saumya's pre-alignment warp uses). LK + RANSAC then refine it.
 #   ORB is global (no motion prior), so it can re-find home after any drift as long as
 #   part of the home area is still in view. It's slower than LK, so it runs only while LOST.
+#   - Stage 2 (bench loop + recovery bonus): the FIRST home picture's fingerprints are kept
+#     as well (set_home(origin=True)). find_origin() looks for it; vision_hold.py calls that
+#     now and then while the reference is a later picture, and switches back when found.
+#     Known limit: a floor of identical tiles can match one tile off.
 #
 # WHERE IT PLUGS IN
 #   vision_hold.py, after health.check(). Uses tracker.relock(), which Saumya already
@@ -49,14 +53,32 @@ class Recovery:
         self.orb = cv2.ORB_create(nfeatures=config.RECOVERY_ORB_FEATURES if n_features is None else n_features)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         self.home_pts = self.home_des = None
+        self.origin = None           # (points, fingerprints) of the FIRST home picture
         self.lost_frames = 0
         self.relocks = 0             # how many times we re-found home (for the log / slides)
 
-    def set_home(self, gray):
-        """Call when HOME is saved: remember its ORB fingerprints."""
+    def set_home(self, gray, origin=False):
+        """Call when HOME is saved: remember its ORB fingerprints.
+        origin=True: a brand-new home (not a re-home): also keep it for find_origin()."""
         kp, self.home_des = self.orb.detectAndCompute(gray, None)
         self.home_pts = np.float32([k.pt for k in kp])
         self.lost_frames = 0
+        if origin:
+            self.origin = (self.home_pts, self.home_des)
+
+    def use_origin(self):
+        """The tracker's reference is the first home picture again."""
+        self.home_pts, self.home_des = self.origin
+        self.lost_frames = 0
+
+    def find_origin(self, gray):
+        """First-home -> now matrix if the first home picture is in view at a similar height, else None."""
+        if self.origin is None or self.origin[1] is None:
+            return None
+        M, _ = self.find_home(gray, *self.origin)
+        if M is None or not config.REHOME_SCALE_MIN <= float(np.hypot(M[0, 0], M[1, 0])) <= config.REHOME_SCALE_MAX:
+            return None                  # other height: the tracker could not hold on to it anyway
+        return M
 
     def update(self, gray, failing):
         """Call every frame. failing = health says LOST and this frame is bad.
@@ -74,15 +96,17 @@ class Recovery:
         self.relocks += 1
         return True
 
-    def find_home(self, gray):
+    def find_home(self, gray, home_pts=None, home_des=None):
         """Search the whole frame for home. Returns (home->now 2x3 matrix or None, inliers)."""
+        if home_des is None:
+            home_pts, home_des = self.home_pts, self.home_des
         kp, des = self.orb.detectAndCompute(gray, None)
         if des is None or len(kp) < self.min_inliers:
             return None, 0
-        matches = self.matcher.match(self.home_des, des)
+        matches = self.matcher.match(home_des, des)
         if len(matches) < self.min_inliers:
             return None, 0
-        src = self.home_pts[[m.queryIdx for m in matches]]
+        src = home_pts[[m.queryIdx for m in matches]]
         dst = np.float32([kp[m.trainIdx].pt for m in matches])
         M, inl = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=3.0)
         n = int(inl.sum()) if inl is not None else 0

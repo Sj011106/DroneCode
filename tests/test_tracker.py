@@ -13,7 +13,8 @@
 import math
 import cv2
 import numpy as np
-from vision.tracker import GroundTracker, to_north_east, load_calibration
+from vision.tracker import GroundTracker, to_north_east
+from tests.common import K                  # fixed test camera (not the repo's calib.npz, which is 1920x1080)
 from health.health import HealthChecker
 
 W, H = 640, 480
@@ -28,7 +29,6 @@ for _ in range(150):   # add some shapes so there are real corners
     cv2.rectangle(ground, (int(x), int(y)), (int(x + rng.integers(10, 60)), int(y + rng.integers(10, 60))),
                   int(rng.integers(0, 256)), -1)
 
-K, _ = load_calibration()
 cx, cy = K[0, 2], K[1, 2]
 OFF = np.array([800 - cx, 800 - cy])   # home = middle of the ground texture
 

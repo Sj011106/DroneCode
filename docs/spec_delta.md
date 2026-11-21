@@ -1,5 +1,9 @@
 # Spec delta: our docs and code vs the six organiser PDFs   (Ayush, 18 Nov 2026)
 
+> **Historical (written before Stage 2, 20 Nov 2026).** Kept for the record. Stage 2 changed the firmware
+> (Betaflight shipped, ArduCopter optional), the camera size (1920 x 1080) and several rules.
+> Current facts: `README.md`, `docs/hardware.md`, `docs/WORKLIST.md`.
+
 Every fact below was checked against the PDFs; page numbers are the **printed** page numbers (as in
 `docs/hardware.md`). If a PDF and our code disagree, the PDF wins. "NOT IN PDFs" = nobody may guess it.
 

@@ -1,156 +1,92 @@
 # Hardware: what we have (from the organisers' documents)
 
-Nobody on the team is a hardware person, and we don't need one: **the organisers provide and fit all
-hardware, and no physical changes are allowed.** This page collects the facts from the Stage 1 technical
-package (Rev 1.3) and the OEM manuals in its folder, so nobody has to dig through PDFs.
-Page numbers refer to the printed pages of each manual.
+Rewritten 21 Nov 2026. Sources: Grand Final Technical Package **Stage 2, Rev 2.0** (20 Nov 2026) and
+the OEM manuals (DTK APB User Manual v1.7.2, MRM2-10AI User Manual v1.0, M2-AI and Justice D / A
+datasheets v1.0). **Where they differ, Stage 2 wins.** Nobody on the team is a hardware person and
+no physical changes are allowed: the organisers provide and fit everything.
 
-> **Team decision: flight controller firmware = ArduPilot (≥ 4.5).** We are not pursuing PX4, INAV or the
-> optional Betaflight bonus route. `link/check_link.py` fails if the flight controller isn't ArduPilot ≥ 4.5.
+Nothing on this page has been measured by us yet.
 
-## 1. The rules that shape our design (Stage 1 package)
+## 1. Rules that shape the design
 
 | Rule | Consequence for us |
 |---|---|
-| Use the supplied M2-AI as is: **no physical modifications** (camera position, angle, mount) | We can't fix vibration mechanically: software only (rolling-shutter fix, health checks) |
-| **No extra cameras or sensors** | No rangefinder unless the organisers supply one: height comes from the barometer |
-| Solution runs **entirely on the APB**, using the **nadir Justice D** + onboard inertial sensing | No laptop in the loop; `compute/benchmark.py` must be run on the APB |
-| **GNSS may be used during setup**, but must **not aid the scored hold** | `--no-gps-fallback` always in the trial; source set 2 (vision) before the hold is engaged |
-| **Event pilots (Ted and Sujan) fly**: takeoff, landing, safety. The pilot holds the aircraft steady, then **a pilot switch engages our hold at that spot** | Our team doesn't pilot. Hold engagement must be smooth (judging area D) |
-| Fiducial markers, tripods etc. allowed **for development only** | Never part of the scored solution |
-| Stage 2 brings: event firmware builds, access + deployment details, sensor rates/timestamps, thresholds | Fill the open items in section 6 then |
+| Do not change APB GPIO lines, device tree, kernel or boot config | **Never run `gpioset`.** The APB manual's p.14 commands are forbidden at the event. If the flight controller link is silent, ask the organisers |
+| Do not enable `orqa-digital-osd` | It takes the cameras and the flight controller link |
+| Keep files in `/data` | The root filesystem is nearly full and `/tmp` is lost at reboot. Recordings can go to `/sdcard` |
+| No GNSS from engage to disengage | Betaflight route never requests it; ArduCopter route runs in trial mode |
+| No extra sensors, no modifications | Height from the barometer; no rangefinder, **no magnetometer** |
+| Do not connect an outdated Betaflight Configurator | The drone manual warns it can reset the flight controller to stock, and the aircraft then flips. We never plug ours in; the organiser laptop shows the Receiver tab |
 
-## 2. Camera: Justice D (datasheet v1.0 + APB manual)
+## 2. Cameras
 
-| Fact | Value | Source |
+| | Justice D (nadir, the one we use) | Justice A (forward) |
 |---|---|---|
-| Sensor | Sony 1/2.8" CMOS, **rolling shutter** (as used by the challenge) | datasheet (sensor); package p.5 Q3 (rolling shutter: the datasheet does not say) |
-| Resolution / rate | **1280 × 720 @ 60 fps**, 16:9 | datasheet |
-| Field of view | **114° horizontal, 86° vertical**, 121.5° diagonal (very wide lens) | datasheet |
-| Output | MIPI CSI, digital | datasheet |
-| Linux device | CSI-1 = **/dev/video2** (CSI-2 = /dev/video3), fixed 1280×720@60 | APB manual p.12 |
-| Controls | **none**: "without any external controls" (no exposure / gain setting) | APB manual p.12 |
+| Device | `/dev/video2` | `/dev/video3` (through an ADV7282 decoder) |
+| Picture | **1920 x 1080, 60 fps, YUYV** (the datasheet said 1280 x 720) | 720 x 576, about 50 fps, PAL; 1 to 3% partial frames |
+| Shutter | rolling; no exposure control | |
+| Field of view | 114 deg horizontal, 86 deg vertical (datasheet) | same lens |
+| Focal length we use | 623 px at 1920 wide (208 px at our 640 working size), computed from the field of view | |
+| Time stamps | CLOCK_MONOTONIC, marks the **end** of the frame; no hardware sync | |
 
-What this means:
-- Use **`--camera 2`** (same as `--camera /dev/video2`).
-- **`calib.npz` in the repo is from a 640×480 webcam, not the Justice D.** Recalibrate the real camera at 1280×720
-  (`calibration/auto_calibrate.py`). With a 114° lens, check the reprojection error: if it's high, a wide-angle
-  lens model (OpenCV's rational model or `cv2.fisheye`) is needed. The calibration scripts are Saumya's, so tell Saumya.
-- **Rolling-shutter readout must be < 16.7 ms** (one frame at 60 fps). `config.READOUT_S` defaults to 15 ms until
-  `calibration/calibrate_timing.py` measures it.
-- We **process at 640×360** (`config.PROCESS_WIDTH`) and 30 fps: a quarter of the pixels, same metres
-  (`tests/test_process_scale.py`). Stale frames are dropped by age (`compute/budget.py`).
-- No exposure control: in very bright or dark light, our contrast boost (`vision/enhance.py`) and the health
-  checks are all we have.
+- `calib.npz` holds the datasheet numbers with no distortion (`python -m calibration.check_calib
+  --write-spec`). A real calibration on the real camera would be better.
+- The lens is wide: leaning stretches one side of the picture. That is why points are levelled
+  before matching (`config.USE_LEVEL_POINTS`).
+- The camera's angle is adjustable 0 to 30 degrees by a screw (MRM p.11). We may not change it;
+  our maths assumes straight down. Look at it and ask if it is not.
+- The datasheet lists auto white balance, WDR and noise reduction, with no way to switch them off.
 
-## 3. The APB (DTK APB User Manual v1.7.2)
+## 3. The APB (onboard computer)
 
-| Fact | Value | Source |
-|---|---|---|
-| Onboard computer | NXP **i.MX8M Plus, 4× Cortex-A53**, 4 GB LPDDR4, **4 GB eMMC**, micro-SD up to 512 GB, NPU 2.25 TOPS | p.3, package Q1 |
-| Flight controller (same board) | STM32H743 | p.3 |
-| OS | **Orqa OS (Yocto Linux BSP)**. Python / pip / OpenCV are **not** stated as included | p.3, package Q1 |
-| Login | USB-C to the laptop = USB-Ethernet gadget, board at **192.168.75.1**: `ssh root@192.168.75.1` | p.10 |
-| Copy files | `rsync -avP DroneCode root@192.168.75.1:~` | p.10 |
-| Ethernet adapter | DHCP client + static 192.168.1.75 | p.10 |
-| Clock | wrong after boot over USB only (needs NTP): log file names may have odd dates | p.10 |
-| Storage | micro-SD mounts at **/sdcard**; `/data` = left-over eMMC space | p.11, p.18 |
-| **Flight-controller link** | **/dev/ttymxc2 (UART3)**, behind an internal switch. Route it to the FC first: `gpioset -t0 -c gpiochip3 13=1` then `gpioset -t0 -c gpiochip3 0=0`. Baud rate not stated | p.14 |
-| Extra sensors on the Linux side | **ICM42605 IMU + DPS310 barometer** connected to the i.MX (not only the FC) | p.5 |
-| Temperature | fan holds ~62 °C; **automatic shutdown at 95 °C**; read `/sys/class/thermal/thermal_zone0/temp` | p.11 |
-| GStreamer | present (`gst-launch-1.0 ...` example) | p.16 |
+| Item | Value |
+|---|---|
+| Processor | i.MX8M Plus, 4 x Cortex-A53, about 3.9 GB RAM; an NPU we do not use |
+| Software | Orqa Yocto Linux, **Python 3.12 with numpy, no compiler, no internet**. Packages are installed from aarch64 wheel files we bring (`wheels/`) |
+| Access | USB-C to a laptop = USB Ethernet; `ssh root@192.168.75.1`, no password |
+| Own sensors | ICM-42605 motion sensor (up to 4 kHz) and DPS310 barometer, through Linux IIO files (`link/apb_sensors.py`) |
+| Link to the flight controller | `/dev/ttymxc2` |
+| Temperature | works 0 to 70 C; shuts down at 95 C (`preflight.py` warns at 75) |
+| Clock | the wall clock is wrong until network time arrives, and then jumps |
 
-What this means:
-- **The 4 GB eMMC is small**: `--record` saves 640×360 grey frames and goes to `/sdcard` when a card is in; it stops
-  recording (not flying) below `config.RECORD_MIN_FREE_MB`. Measured worst case (noisy texture, 640×360,
-  30 fps): FFV1 lossless ≈ **250 MB per minute**, `config.RECORD_CODEC = "MJPG"` ≈ **90 MB per minute** (lossy).
-  Without an SD card, ~2 GB free eMMC = ~8 min of FFV1: put a card in for practice flights.
-- **The FC link needs the switch.** `tools/discover_hardware.py --route-fc-uart` and the boot service
-  (`ExecStartPre`) run the two `gpioset` commands from p.14.
-- **Possible upgrade later:** the Linux-side ICM42605 could give a high-rate IMU directly for the rolling-shutter
-  fix (the 50 Hz MAVLink attitude can't follow vibration above ~25 Hz). `discover_hardware.py` lists it if Linux sees it.
+## 4. The aircraft (Orqa M2-AI / MRM2-10AI)
 
-## 4. Aircraft (M2-AI datasheet v1.0, MRM2-10AI manual v1.0)
+- 1359 g, 10 inch props, 2814 880 kV motors. It hovers at low throttle, so small throttle changes
+  have a large effect: our height hold may move the throttle by at most ±50 (`BF_THROTTLE_AUTHORITY`).
+- **Flight controller firmware as issued: Betaflight 2025.12.5.** MSP v1 at 115200 on
+  `/dev/ttymxc2`. With the engage switch on it flies the stick values we send
+  (`MSP_SET_RAW_RC`: roll, pitch, throttle, yaw). **It has no command timeout**, and before our
+  first message it reads minimum values. Recommended rate 50 Hz.
+- **Optional: ArduCopter 4.7.2**, flashed by the team, described by the organisers as untuned and
+  unflown. MAVLink 2 at 230400.
+- Radio channels (MRM p.13 and Stage 2): CH1 roll, CH2 pitch, CH3 throttle, CH4 yaw, CH5 arm,
+  CH9 (TL1) flight mode, **CH10 (TL2) = engage switch**, CH11 video transmitter.
+- The video transmitter overheats after 60 s on the ground at full power: keep it low or off on
+  the bench (MRM p.14).
+- The bench needs the battery in: USB-C alone does not power the flight controller.
+- **Props off whenever the USB-C cable is in.**
+- 10 inch props "generate substantial vibrations" (MRM p.22): a reason for the rolling-shutter work.
 
-- 1359 g, 10" props, 2814 motors, Orqa ESC3030 4-in-1 70 A, GPS/GLONASS + magnetometer + barometer module.
-- **The stock flight-controller firmware appears to be Betaflight** (the aircraft manual's troubleshooting refers
-  to the Betaflight Configurator, MRM p.19). Stock modes on switch TL1 (CH9): up = Acro, middle = Position Hold
-  (GPS), down = Return to Home (MRM p.18). **So an ArduPilot build must be flashed or issued for the event**
-  (WORKLIST task 1.11).
-- The manual describes no nadir camera and gives no image orientation: **check on day 1 which way the top of the
-  Justice D image points relative to the nose** (our code assumes top of image = nose; WORKLIST 3.5 bench test).
-- Without GPS, stock heading = whatever the drone faced at power-up (MRM p.21): our setup uses ArduPilot's compass.
-- Safety: props off during USB-C configuration; never power on without antennas (MRM p.3).
+## 5. What we still have to find out on the aircraft
 
-## 5. Day-1 checklist (no hardware knowledge needed)
+| Question | Where the answer goes |
+|---|---|
+| Sign of pitch and roll in Betaflight's attitude reply | `BF_ATT_PITCH_SIGN`, `BF_ATT_ROLL_SIGN` |
+| Position of the throttle in Betaflight's channel reply | `BF_RC_THROTTLE_INDEX` |
+| Do our roll and pitch commands push against the move | `BF_ROLL_SIGN`, `BF_PITCH_SIGN`, `CAMERA_UPSIDE_DOWN` |
+| Betaflight `angle_limit` and the hover throttle (ask the crew) | `BF_ANGLE_LIMIT_DEG`, `BF_HOVER_THROTTLE` |
+| Names of the IIO sensor files | `python -m link.apb_sensors` prints them |
+| Milliseconds per frame and start-up time on the APB | `python -m compute.benchmark`; time a power-cycle |
+| Rolling-shutter readout time and camera-to-sensor delay | `python -m calibration.calibrate_timing` writes `timing.npz` |
+| Is the nadir camera really straight down, top edge toward the nose | look, and ask |
 
-> **Before running anything by hand: `systemctl stop vision_hold`** (if the boot service was enabled). Two
-> programs on one camera or serial port break each other.
+The step-by-step list is in [`WORKLIST.md`](WORKLIST.md) section 3.
 
-1. Laptop ↔ APB with USB-C. `ssh root@192.168.75.1`.
-2. Copy the repo: from the laptop, `rsync -avP DroneCode root@192.168.75.1:~`.
-3. On the APB: `cd ~/DroneCode && sh deploy/install.sh` (or the offline steps in section 7).
-4. `venv/bin/python -m tools.discover_hardware --route-fc-uart` → **save the whole output** into this file.
-   Look at `logs/hw_camera_*.jpg`: the one showing the floor is the Justice D (expected: camera 2).
-5. `venv/bin/python -m compute.benchmark` → total under 33 ms? (WORKLIST 3.2)
-6. `venv/bin/python -m link.check_link --connect /dev/ttymxc2` → firmware must be ArduPilot ≥ 4.5.
-7. `venv/bin/python -m ardupilot.load_params --connect /dev/ttymxc2`, reboot the FC, check_link again → **PASS**.
-8. Props OFF: `venv/bin/python -m calibration.auto_calibrate 2`, then
-   `venv/bin/python -m calibration.calibrate_timing --camera 2 --connect /dev/ttymxc2`.
+## 6. Installing with no internet on the board
 
-## 6. Still unknown (Stage 2 / ask the organisers)
-
-- Is Python 3 + pip available on the event image, and may we install packages (numpy, OpenCV, pymavlink)?
-- Will an **ArduPilot ≥ 4.5 build** be issued for the APB flight controller? Which version exactly?
-- FC serial settings on the link: which SERIALx, baud, MAVLink 2? Does the gpioset switch keep its state over reboots?
-- Camera pixel format on /dev/video2, and does OpenCV's V4L2 backend open it (or only GStreamer)?
-- Image orientation of the nadir camera relative to the nose; camera mount damping.
-- IMU / attitude rates delivered, timestamp conventions, camera–IMU timing information (package Q4).
-- Rangefinder supplied? Drift and stability thresholds, altitude levels, how altitude is measured.
-- What does the pilot's "engage" switch do exactly (which channel, which mode)?
-
-Added by Ayush (18 Nov) after re-reading all six PDFs (full list of differences: `docs/spec_delta.md`):
-
-1. **Hold thresholds:** what exactly is measured (largest distance from the engage point, RMS drift, or time
-   inside a radius)? What counts as "stable"? Minimum hold time? Which instrument measures it, and is altitude
-   above take-off or above ground? (Until then `config.HOLD_*` are PLACEHOLDERS, `tools/hold_score.py`.)
-2. **Engage switch:** which switch on the pilots' Tac.Ctrl, which channel and PWM, and what must it do in
-   ArduPilot (flight-mode change to LOITER, or an auxiliary function)? What should disengaging do?
-3. **Channel map in the issued ArduPilot build:** the MRM2-10AI manual (p.13) puts Arm/Disarm on CH5 and the
-   mode switch on CH9, but ArduPilot reads flight modes from CH5 by default. Will the build set `FLTMODE_CH` = 9
-   and arming on CH5 (`RC5_OPTION` = 153)? May teams change these?
-4. **Second pilot input:** may we use the unassigned left button (CH7, manual p.13) to save the hold point, or
-   must the single engage switch do everything?
-5. **GNSS during the scored hold:** will GPS reports (MAVLink GPS_RAW_INT) still reach the APB? Will the receiver
-   be switched off in firmware, jammed, or spoofed?
-6. **Justice D image:** is the OSD (voltage, name, timer) burned into the frames on /dev/video2? Can the automatic
-   day/night switch and the AI noise reduction be fixed off? What is the rolling-shutter readout time?
-7. **Justice D mount:** at what angle from straight down is it fixed (the manual, p.11, says the mount adjusts
-   0–30°), and which way is the top of the image relative to the nose?
-8. **Failsafe:** if our software loses vision during the scored hold, may it command LAND, or must it hand back to
-   the pilot (ALT_HOLD)?
-9. **Weather:** the highest wind at which scored holds are flown?
-10. **Logistics:** will SD cards be provided (FAT32 limits one file to 4 GB), and is network time (NTP) available?
-
-## 7. Offline install (if the APB has no internet)
-
-On a laptop with internet, once you know the APB's Python version (step 4 above prints it, e.g. 3.10):
-
-```bash
-pip download -r requirements.txt --only-binary=:all: \
-    --platform manylinux2014_aarch64 --python-version 3.10 -d wheels/
+On a laptop with internet:
 ```
-
-Copy `wheels/` to the APB, then on the APB:
-
-```bash
-python3 -m venv venv
-venv/bin/pip install --no-index --find-links wheels/ -r requirements.txt
+pip download -r requirements.txt -d wheels --only-binary=:all: --platform manylinux2014_aarch64 --python-version 3.12
 ```
-
-`requirements.txt` is the single list (numpy, opencv-python, pymavlink, matplotlib), so the offline wheels match
-what `install.sh` installs. If a package has no ARM wheel, pip says so: test this **before** the event.
-matplotlib is only needed for plots; skip it on the APB if it has no wheel and make the plots on a laptop.
-
-Sources: Stage 1 Participant Technical Package Rev 1.3; Justice D Datasheet v1.0; M2 AI Datasheet v1.0;
-DTK APB User Manual v1.7.2; MRM2-10AI User Manual v1.0 (OEM folder of the package).
+Copy the whole folder to `/data/DroneCode` and run `sh deploy/install.sh`. It reuses the board's
+numpy and installs the rest from `wheels/`.
