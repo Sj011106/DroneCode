@@ -77,7 +77,7 @@ flowchart LR
         MET["pixels to metres<br/>(to_north_east)"]
         RH["vision/rehome.py<br/>new reference while climbing<br/>+ offset to original home"]
         LINK["link/drone_link.py<br/>ODOMETRY + noise that<br/>grows with height"]
-        FS["recovery/failsafe.py<br/>LAND after 3 s lost"]
+        FS["handover.py<br/>LAND after 3 s lost, only in LOITER/POSHOLD"]
         PROF["compute/profiler.py<br/>ms per stage"]
         RECD["tools/replay.py<br/>--record"]
     end
@@ -117,7 +117,7 @@ score and an error estimate, and we switch the EKF between GPS (source set 1) an
 ```mermaid
 stateDiagram-v2
     [*] --> WAITING: program starts
-    WAITING --> LOST: pilot flips channel 7 (home photo saved)
+    WAITING --> LOST: program starts and sees the ground (home photo saved)
     LOST --> OK: 5 good frames in a row (EKF switched to vision)
     OK --> DEGRADED: 1 bad frame (blur, few points, IMU disagrees)
     DEGRADED --> OK: next frame good
@@ -180,7 +180,7 @@ measure it with `compute.benchmark`). Steps in the order `vision_hold.py` runs t
 | 1 | Grab | `vision_hold.py`, `compute/budget.py` | Read the newest picture and timestamp it; throw away stale ones |
 | 2 | Contrast boost | `vision/enhance.py` | Bring out detail in flat, hazy views (leaves very dark/bright frames alone, so the alarms still work) |
 | 3 | Record | `tools/replay.py` | Only with `--record`: save the frame, its time, the IMU and the height for replay |
-| 4 | Home trigger | `vision_hold.py` | Pilot flipped channel 7? Save the home photo (rolling-shutter corrected) |
+| 4 | Home trigger | `vision_hold.py`, `handover.py` | Save the home photo (rolling-shutter corrected): at start; again by itself if vision is lost for 2 s while the pilot flies by hand and the height changed (`AutoReanchor`); and when the pilot selects LOITER/POSHOLD (`REANCHOR`) |
 | 5 | Track | `vision/tracker.py` + `vision/rolling_shutter.py` | Find home's corners again, undo the rolling-shutter warp, measure slide + turn + scale |
 | 6 | Health | `health/health.py` | Too dark? Blurry? Frozen? Enough agreeing points? → quality score, OK / DEGRADED / LOST |
 | 7 | Height | `fusion/height.py` | Smooth the barometer/rangefinder height, ignore spikes |
@@ -190,7 +190,7 @@ measure it with `compute.benchmark`). Steps in the order `vision_hold.py` runs t
 | 11 | Metres | `vision/tracker.py: to_north_east()` | pixels × height ÷ focal length → metres North/East, plus the re-home offset |
 | 12 | Re-home | `vision/rehome.py` | Ground ~15% bigger/smaller (climb/descent)? New reference here, same position |
 | 13 | Send | `link/drone_link.py` | ODOMETRY to ArduPilot: position, quality (−1 = "ignore me"), error that grows with height |
-| 14 | Source / failsafe | `vision_hold.py`, `recovery/failsafe.py` | Switch the EKF to vision when trusted; LAND if lost for 3 s |
+| 14 | Source / failsafe | `vision_hold.py`, `handover.py` | Switch the EKF to vision when trusted; only while the pilot is in LOITER/POSHOLD: LAND if vision is lost for 3 s (the pilot always wins) |
 | 15 | Log | `logs/flight_*.csv` | One row per frame: position, status, corrections, re-homes, ms per stage |
 
 ---
@@ -346,7 +346,7 @@ venv/bin/python -m compute.benchmark                          # → logs/benchma
 ```bash
 systemctl stop vision_hold                                    # only if the boot service is running
 venv/bin/python -m link.check_link --connect /dev/ttymxc2     # must say PASS (ArduPilot >= 4.5, params)
-venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --trigger rc --no-gps-fallback --record
+venv/bin/python vision_hold.py --connect /dev/ttymxc2 --camera 2 --no-gps-fallback --record
 ```
 
 **ArduPilot settings** (once, drone disarmed, then reboot the flight controller):
@@ -365,16 +365,19 @@ What the settings do (details in the comments of `ardupilot/vision_hold.param`):
 | Source set 1 | `EK3_SRC1_* = GPS / baro / compass` | normal flying |
 | Source set 2 | `EK3_SRC2_POSXY 6` (vision), `POSZ 1` (baro), `YAW 1` (compass), `EK3_SRC_OPTIONS 0` | position from us; height and heading never from vision; no spoofed GPS velocity |
 | Gentle hold | `ANGLE_MAX 2000`, `LOIT_SPEED 500`, `LOIT_ACC_MAX 250` | small tilts keep the ground in view and the tilt fix accurate |
-| Safety | `FS_EKF_ACTION 1`, `RC7_OPTION 0` | EKF failsafe lands; RC7 is our home switch |
+| Safety | `FS_EKF_ACTION 1`, `RC7_OPTION 0` | EKF failsafe lands; RC7 is no longer used by our program (kept free) |
 | From the spec | serial port, GPS off, rangefinder (commented out) | wrong serial port can break the RC receiver: fill in only from the spec |
 
 `load_params` refuses to write while the motors are armed, never overwrites an RC channel that already has a
 function (unless `--force`), maps renamed parameters on newer ArduPilot (e.g. `ANGLE_MAX` → `ATC_ANGLE_MAX`), and
 fails if any parameter is missing.
 
-**In the air** (the event pilots fly): take off in ALT_HOLD → at the test position, channel 7 → home is saved
-and the program switches the EKF to vision once health says OK → the pilot engages the hold (LOITER).
-GPS may help during setup only, never in the scored hold: always `--no-gps-fallback` in the trial.
+**In the air** (the event pilots fly): take off in ALT_HOLD. The program saves home at start. If vision is lost
+while the pilot flies by hand (for example home was saved on the ground and the aircraft climbed), it saves a new home
+by itself after 2 s (`AUTO_REANCHOR_AFTER_S` in `config.py`) and switches the EKF to vision once health says OK.
+At the test position the pilot holds the aircraft still and selects LOITER (or POSHOLD): the program saves home at that
+spot (`REANCHOR`) and ArduPilot holds it. Selecting any other mode hands control straight back; the failsafe only acts
+in LOITER/POSHOLD. GPS may help during setup only, never in the scored hold: always `--no-gps-fallback` in the trial.
 
 Useful `vision_hold.py` options:
 
@@ -462,7 +465,7 @@ Checked in ArduPilot's source (`AP_VisualOdom_MAV.cpp`):
 | OK | position + quality + noise | holds position |
 | DEGRADED (1–2 bad frames) | quality −1 | coasts on IMU + barometer for a few hundred ms, which is fine |
 | LOST | quality −1 every frame | dead-reckons; its uncertainty grows while `recovery.py` searches for home |
-| LOST > 3 s | our failsafe switches to LAND | lands in place |
+| LOST > 3 s while the pilot is in LOITER/POSHOLD | our failsafe (`handover.py`) switches to LAND | lands in place |
 | EKF estimate bad | (backup) | `FS_EKF_ACTION 1` → lands |
 
 ### What we tune (in this order)
@@ -583,7 +586,7 @@ downward camera sees for any position, tilt and rolling-shutter timing, so every
 | Rolling shutter | readout 30 → 29 ms, delay −20 → −19 ms measured; 92% of rolling-shutter error removed |
 | IMU check | 20° disagreement rejected, agreement within 0.01° |
 | Recovery | 2 s and 10 s blackouts with 1–2 m drift: trusted again in 0.2 s (without recovery: never) |
-| Failsafe | fires once, 3.0 s after loss, re-arms after recovery; resends the mode until the autopilot confirms (gives up after 5 and tells the pilot); fires when health says OK but no valid position is sent |
+| Failsafe (`handover.py`) | only while the pilot is in LOITER/POSHOLD (the pilot always wins); fires once, 3.0 s after loss; resends the mode until the autopilot confirms (gives up after 5 and tells the pilot); fires when health says OK but no valid position is sent |
 | Params | 32 settings match what the code needs; loader verifies, writes, maps renamed params, won't overwrite a used RC channel; ArduPilot 4.4 flagged as too old; noise sent grows with height above ~40 m |
 | Re-home (climb 10 → 40 m) | without: trust lost at 13.4 m (15.8% trusted); with: 98.8% trusted (100% above 15 m), 8 re-homes, error mean 6.7–8.0 cm, max 15 cm |
 | Replay | identical results on repeat; live run (rocking attitude, RS fix on) reproduced 90/90 frames; tilt fix off → error 3.8 → 50.2 cm; RS fix off → trusted frames 94 → 56 |

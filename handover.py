@@ -79,3 +79,29 @@ class Handover:
         self.sent_at = now
         self.sends += 1
         return [("SET_MODE", self.failsafe_mode)]
+
+
+class AutoReanchor:
+    """Ask for a fresh HOME while the pilot flies by hand and vision is lost because the ground now looks
+    very different from home (home was saved on the ground, then the aircraft climbed).
+
+    Why: without it vision stays LOST at altitude, ArduPilot has no position, and it refuses LOITER, so the
+    hold can never be engaged without GNSS. Never acts while a hold is engaged: the engage point is saved by
+    Handover's REANCHOR, and an engaged hold that loses vision goes to the failsafe instead."""
+
+    def __init__(self, after_s):
+        self.after_s = after_s              # 0 or less = off
+        self.since = None
+
+    def update(self, now, engaged, wanted):
+        """wanted = vision LOST and the picture is far from home's scale. True = save a new home now."""
+        if self.after_s <= 0 or engaged or not wanted:
+            self.since = None
+            return False
+        if self.since is None:
+            self.since = now
+            return False
+        if now - self.since >= self.after_s:
+            self.since = now                # still lost after another after_s: try again
+            return True
+        return False

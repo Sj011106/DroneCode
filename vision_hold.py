@@ -43,8 +43,7 @@ import csv
 import os
 import time
 import math
-import config
-from handover import Handover, REANCHOR
+from handover import AutoReanchor, Handover, REANCHOR
 
 import cv2
 import numpy as np
@@ -203,6 +202,28 @@ def main(argv=None):                                             # NEW: argv for
     handover = Handover(hold_modes=HOLD_MODES, failsafe_after_s=config.FAILSAFE_AFTER_S,
                         failsafe_mode=config.FAILSAFE_ACTION,
                         max_sends=config.FAILSAFE_MODE_RETRIES)
+    auto_reanchor = AutoReanchor(config.AUTO_REANCHOR_AFTER_S)
+    # Part D: handover timers run on a monotonic clock, so a wall-clock correction (the APB's time is wrong until
+    # NTP, APB manual p.10) cannot jump the failsafe timer. A replay uses its recorded time.
+    hclock = replay.clock if replay else time.monotonic
+    home_height = None                                       # Part D: height when HOME was saved (scale reference)
+
+    def act_on(actions):
+        """Do what handover.py asked. Returns True if it asked for a new HOME (REANCHOR)."""
+        want_home = False
+        for action in actions:
+            if action == REANCHOR:
+                want_home = True
+            elif action[0] == "GAVE_UP":
+                text = f"FAILSAFE: {handover.failsafe_mode} ignored. PILOT TAKE OVER"   # <= 50 chars: STATUSTEXT limit
+                print(f"{text} (after {handover.max_sends} tries, flight mode {link.conn.flightmode})")
+                with link.send_lock:
+                    link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, text[:50].encode())
+            else:
+                print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
+                with link.send_lock:
+                    link.conn.set_mode(action[1])
+        return want_home
 
     os.makedirs("logs", exist_ok=True)
     log_path = args.log or time.strftime("logs/flight_%Y%m%d_%H%M%S.csv")   # NEW: --log
@@ -245,19 +266,9 @@ def main(argv=None):                                             # NEW: argv for
             ok, frame = cap.read()
             t_capture = clock()                                  # NEW: was time.time()
             if not ok and is_camera and home_saved:              # Part D: dead camera = quality 0
-                for action in handover.update(t_capture, link.conn.flightmode, 0,
-                                              mode_fresh=link.mode_age() < 1.5):
-                    if action == REANCHOR:
-                        reanchor_request = True
-                    elif action[0] == "GAVE_UP":
-                        msg = f"FAILSAFE: autopilot ignored {link.conn.flightmode} after {handover.max_sends} tries - PILOT MUST TAKE OVER"
-                        print(msg)
-                        with link.send_lock:
-                            link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, msg[:50].encode())
-                    else:
-                        print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
-                        with link.send_lock:
-                            link.conn.set_mode(action[1])
+                if act_on(handover.update(hclock(), link.conn.flightmode, 0,
+                                          mode_fresh=link.mode_age() < 1.5)):
+                    reanchor_request = True
             if not ok:
                 if not is_camera:
                     print("Video finished.")
@@ -303,6 +314,7 @@ def main(argv=None):                                             # NEW: argv for
                     recovery.set_home(gray)                      # NEW: fingerprints for re-finding home
                     rehome.reset()                               # NEW: positions count from THIS home
                     home_saved, home_pending = True, False
+                    home_height = link.height(t_capture)         # Part D: scale reference for AutoReanchor
                     reset_counter = (reset_counter + 1) % 256    # tells the EKF "position jumped to 0"
                     prev_ne, vel_ned = None, np.zeros(3)
                     print(f"HOME saved automatically ({n} corners, trigger '{args.trigger}')")
@@ -368,6 +380,7 @@ def main(argv=None):                                             # NEW: argv for
             if config.USE_REHOME and quality > 0 and att_real and rehome.due(rep.status, res):
                 if rehome.rehome(tracker, health, gray, t_capture, north, east, MIN_HOME_CORNERS):
                     home_att = att_real
+                    home_height = height                         # Part D: new scale reference
                     imu_check.set_home(att_real[2])              # rotation restarts at 0 here
                     recovery.set_home(gray)
                     print(f"Re-homed at {height:.1f} m (#{rehome.count}), offset N={north:+.2f} E={east:+.2f}")
@@ -397,19 +410,19 @@ def main(argv=None):                                             # NEW: argv for
             if link.conn.flightmode in HOLD_MODES and age > 3.0 and now - last_hb_warn >= 5.0:
                 print(f"WARNING: no fresh autopilot heartbeat for {age:.1f} s - failsafe cannot act")
                 last_hb_warn = now
-            for action in handover.update(now, link.conn.flightmode, quality,
-                                          mode_fresh=age < 1.5):
-                if action == REANCHOR:
-                    reanchor_request = True                      # next frame saves home + bumps reset_counter
-                elif action[0] == "GAVE_UP":
-                    msg = f"FAILSAFE: autopilot ignored {link.conn.flightmode} after {handover.max_sends} tries - PILOT MUST TAKE OVER"
-                    print(msg)
-                    with link.send_lock:
-                        link.conn.mav.statustext_send(mavutil.mavlink.MAV_SEVERITY_CRITICAL, msg[:50].encode())
-                else:
-                    print(f"FAILSAFE: no valid vision position for {config.FAILSAFE_AFTER_S:g} s while holding: {link.conn.flightmode} -> {action[1]}")
-                    with link.send_lock:
-                        link.conn.set_mode(action[1])
+            hnow = hclock()
+            if act_on(handover.update(hnow, link.conn.flightmode, quality, mode_fresh=age < 1.5)):
+                reanchor_request = True                          # next frame saves home + bumps reset_counter
+            # Part D: pilot flying by hand + vision LOST + the ground looks far from home's scale (home was saved on
+            # the ground, then we climbed) -> save a new home HERE, so vision is ready BEFORE the pilot engages.
+            # Without this ArduPilot never gets a position and refuses LOITER (no GNSS to fall back on).
+            h_ok = height is not None and height >= MIN_HEIGHT_M
+            scale_far = h_ok and (home_height is None or home_height < MIN_HEIGHT_M
+                                  or not 0.7 <= height / home_height <= 1.4)
+            if auto_reanchor.update(hnow, handover.engaged, rep.status == "LOST" and scale_far):
+                reanchor_request = True
+                print(f"Vision LOST while the pilot flies by hand (height {height:.1f} m, home was at "
+                      f"{home_height or 0:.1f} m): saving a new home here")
 
             prof.end_frame()                                     # NEW
             ms = prof.current

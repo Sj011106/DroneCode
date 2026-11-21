@@ -7,7 +7,6 @@ vision_hold.py. The script plays the pilot (mode changes) and the camera (qualit
     python tools/sitl_link_check.py [--connect tcp:127.0.0.1:5762]
 """
 import argparse
-import inspect
 import os
 import sys
 import time
@@ -115,16 +114,24 @@ def main():
     mx = max(ages)
     verdict(1, "mode_age < 1.5 s and never inf", mx < 1.5 and mx != float("inf"), f"(max {mx:.2f} s)")
 
-    # ---- 2. HEARTBEAT filter: read the code, print what it checks
-    src = inspect.getsource(DroneLink._reader)
-    hb = src[src.index('kind == "HEARTBEAT"'):src.index('kind == "GPS_GLOBAL_ORIGIN"')]
-    fields = [f for f in ("get_srcSystem() == self.conn.target_system",
-                          "msg.type != mavutil.mavlink.MAV_TYPE_GCS",
-                          "msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID") if f in hb]
-    say("2. HEARTBEAT branch in drone_link.py checks:")
-    for f in fields:
-        say(f"     {f}")
-    verdict(2, "own GCS/onboard heartbeats cannot refresh mode_age", len(fields) == 3)
+    # ---- 2. HEARTBEAT filter: feed made-up HEARTBEAT messages through the REAL filter (DroneLink.is_autopilot_heartbeat)
+    from pymavlink import mavutil
+    M = mavutil.mavlink
+    sysid = link.conn.target_system
+
+    class _Hb:
+        def __init__(self, s, t, a):
+            self._s, self.type, self.autopilot = s, t, a
+
+        def get_srcSystem(self):
+            return self._s
+
+    cases = [(_Hb(sysid, M.MAV_TYPE_QUADROTOR, M.MAV_AUTOPILOT_ARDUPILOTMEGA), True),       # the flight controller
+             (_Hb(sysid, M.MAV_TYPE_GCS, M.MAV_AUTOPILOT_INVALID), False),                   # a ground station
+             (_Hb(sysid, M.MAV_TYPE_ONBOARD_CONTROLLER, M.MAV_AUTOPILOT_INVALID), False),    # our own heartbeat
+             (_Hb(sysid + 1, M.MAV_TYPE_QUADROTOR, M.MAV_AUTOPILOT_ARDUPILOTMEGA), False)]   # another vehicle
+    got = [link.is_autopilot_heartbeat(m) for m, _ in cases]
+    verdict(2, "only the autopilot's heartbeat can refresh mode_age", got == [e for _, e in cases], f"(got {got})")
 
     # ---- 3. LOITER + quality 0 -> one LAND, mode LAND, no loop freeze
     say("3. LOITER, camera covered (quality 0) up to 12 s")

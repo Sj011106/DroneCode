@@ -67,6 +67,9 @@ FAILSAFE_ACTION = "LAND"     # "LAND", "ALT_HOLD" or "NONE". LAND matches ArduPi
                              # EKF failsafe default (FS_EKF_ACTION = 1).
 FAILSAFE_MODE_RETRIES = 5    # resend the mode change (1 per second) until the autopilot reports it
 IMU_DISAGREE_RECOVER_FRAMES = 3   # this many IMU-disagreement frames in a row -> try recovery (relock)
+AUTO_REANCHOR_AFTER_S = 2.0  # pilot flying by hand, vision LOST and the picture is far from home's scale (home saved on the
+                             # ground, then climbed): save a new home here after this many seconds. 0 = off. Never acts while a
+                             # hold is engaged. Without it LOITER cannot be engaged without GNSS (see handover.py AutoReanchor).
 
 # ---------------- Autopilot ----------------
 MIN_ARDUPILOT_VERSION = (4, 5, 0)   # TEAM DECISION: ArduPilot only, >= 4.5. Before 4.5 the autopilot

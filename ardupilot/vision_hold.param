@@ -19,7 +19,7 @@
 #
 # FLIGHT PROCEDURE THESE SETTINGS ASSUME
 #   1. Take off in ALT_HOLD (needs no position).
-#   2. vision_hold.py saves HOME on the first frame with enough ground texture (HOME_TRIGGER "start"), and again each time the pilot selects LOITER/POSHOLD.
+#   2. vision_hold.py saves HOME on the first frame with enough ground texture (HOME_TRIGGER "start"); again by itself if vision is lost while the pilot flies by hand and the height changed (AUTO_REANCHOR_AFTER_S in config.py); and again each time the pilot selects LOITER/POSHOLD.
 #   3. When health is OK, vision_hold.py switches the EKF to source set 2 (vision).
 #   4. Pilot switches to LOITER -> ArduPilot holds position using our vision.
 #   5. Vision lost > FAILSAFE_AFTER_S while in LOITER/POSHOLD -> handover.py applies FAILSAFE_ACTION (default LAND); EKF failsafe below is the backup.
