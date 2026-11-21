@@ -68,6 +68,9 @@ ATTITUDE_MAX_AGE_S = 0.1     # an attitude sample further than this from the fra
 
 # ---------------- IMU cross-check ----------------
 IMU_CHECK_MAX_DEG = 5.0      # vision rotation vs IMU yaw change may differ by at most this
+IMU_CHECK_DRIFT_DEG_S = 0.5  # STAGE 2, MEASURED 21 Nov 2026: with no compass, Betaflight's heading drifts while the
+                             # drone sits still (0.16 deg/s on our aircraft). The check follows a slow drift up to
+                             # this rate and still catches a sudden disagreement. 0 = the old fixed comparison
 
 # ---------------- Height filter ----------------
 HEIGHT_MAX_RATE_MPS = 3.0    # height can't change faster than this (else it's a spike)
@@ -173,6 +176,13 @@ GNSS_DISAGREE_S = 3.0        # ... for this long while vision is trusted -> SPOO
                              # (5 m / 2 s gave 3 false alarms in 10 min of honest, wandering GPS: measured)
 GNSS_ANCHOR_S = 5.0          # GPS reference point = median of the first 5 s of fixes after home is saved
 GNSS_ALARM_HOLD_S = 10.0     # keep showing SPOOF SUSPECTED this long after the last evidence
+
+# ---------------- Camera format (STAGE 2, MEASURED on the APB 21 Nov 2026) ----------------
+# Opened without asking, /dev/video2 gives 640x480. Asked for YUYV 1920x1080 it delivers 1920x1080.
+# The driver does not report its frame rate (OpenCV returns -1), so we state it here.
+CAMERA_SIZE = (1920, 1080)   # what compute/budget.open_camera() asks a Linux camera for
+CAMERA_FOURCC = "YUYV"
+CAMERA_FPS = 60
 
 # ---------------- Flight controller route (STAGE 2) ----------------
 # "ardupilot"  = MAVLink ODOMETRY to ArduCopter (link/drone_link.py). Needs the team to flash and tune it.

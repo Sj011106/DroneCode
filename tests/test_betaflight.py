@@ -152,6 +152,22 @@ t = run(s, t, 0.1)
 assert fc.sticks()[:2] == (1500, 1500)
 print(f"  centred {config.BF_TARGET_TIMEOUT_S} s after the last request; centred whenever the switch is off")
 
+# REVIEW M2: the wall clock jumping BACK must not revive a dead request (freshness is on its own clock)
+fc.rc[9] = 2000
+s.step(t, fresh_now=100.0)
+s.set_target(1450, 1550, 100.0)
+s.step(t, fresh_now=100.1)
+assert fc.sticks()[:2] == (1450, 1550)
+s.step(t - 3600.0, fresh_now=101.0)                                 # wall clock 1 h back, request 1 s old
+assert fc.sticks()[:2] == (1500, 1500), "stale request used after a clock jump"
+# REVIEW M3: a NaN request is ignored, never turned into the cap
+s.set_target(float("nan"), float("nan"), 101.0)
+s.step(t, fresh_now=101.01)
+assert fc.sticks()[:2] == (1500, 1500) and pc.sticks(float("nan"), 0.0, 0.0, 0.0) == (1500, 1500)
+print("  wall clock jumps back 1 h: still centred; NaN request: centred")
+fc.rc[9] = 1000
+t = run(s, t, 0.1)
+
 print("\nTest 5: the lean is capped twice (controller, then sender)")
 most = 500 * config.BF_MAX_TILT_DEG / config.BF_ANGLE_LIMIT_DEG
 roll, pitch = pc.sticks(50.0, -50.0, 0.0, 0.0)                      # 50 m away: still only BF_MAX_TILT_DEG

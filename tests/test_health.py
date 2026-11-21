@@ -69,4 +69,21 @@ for _ in range(6):                                           # rangefinder takes
 print(f"  lasting step to 15 m               -> filter at {out:.2f} m after 6 frames (accepted)")
 assert out > 12.5
 assert hf.update(t, None) is None                            # no reading -> no height
+# STAGE 2: heading creep (no compass) must not trip the check; a sudden jump still must
+import config
+import math as _m
+from fusion.imu_check import ImuCheck as _IC
+_c = _IC()
+_c.set_home(0.0)
+_ok = [_c.check(0.0, _m.radians(-0.16 * k / config.TARGET_FPS))[0] for k in range(120 * config.TARGET_FPS)]
+assert all(_ok), "0.16 deg/s creep for 2 minutes (19 deg in total) must stay trusted"
+assert not _c.check(12.0, _m.radians(-0.16 * 120))[0], "a sudden 12 deg disagreement is still caught"
+_old = config.IMU_CHECK_DRIFT_DEG_S
+config.IMU_CHECK_DRIFT_DEG_S = 0.0
+_c = _IC()
+_c.set_home(0.0)
+assert not _c.check(0.0, _m.radians(-8.0))[0], "drift following off: the old fixed comparison"
+config.IMU_CHECK_DRIFT_DEG_S = _old
+print("  heading creep 0.16 deg/s for 2 min: trusted throughout; sudden 12 deg jump: rejected")
+
 print("\nALL HEALTH TESTS PASSED")

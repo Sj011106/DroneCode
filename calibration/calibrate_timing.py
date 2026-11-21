@@ -144,9 +144,10 @@ def main():
     else:
         link = DroneLink(args.connect)
     link.start()
-    cap = cv2.VideoCapture(int(args.camera) if args.camera.isdigit() else args.camera)
+    from compute.budget import camera_fps, open_camera      # STAGE 2: real camera format, fps not reported
+    cap = open_camera(args.camera)
     make_low_latency(cap)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    fps = camera_fps(cap, config.CAMERA_FPS)
 
     # Record first, analyse afterwards: doing optical flow inside the loop would slow it down,
     # frames would queue up and their delay would bias the measured offset (vs. flight).

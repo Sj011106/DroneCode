@@ -217,7 +217,8 @@ def check_timing(path=None, fps=60.0):
 # ---------------- 7. camera ----------------
 def check_camera(source="2", opener=None, n_frames=30, clock=time.perf_counter):
     import cv2
-    opener = opener or (lambda s: cv2.VideoCapture(int(s) if str(s).isdigit() else s))
+    from compute.budget import open_camera                     # STAGE 2: same format request as vision_hold.py
+    opener = opener or open_camera
     want_w, want_h = config.PREFLIGHT_CAMERA_SIZE
     cap = opener(source)
     try:

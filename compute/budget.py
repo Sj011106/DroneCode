@@ -34,9 +34,33 @@
 #   - Linux V4L2 streaming I/O (driver buffer queue): https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/mmap.html
 # =====================================================================================
 
+import sys
+
 import cv2
 
 import config
+
+
+def open_camera(source):
+    """STAGE 2: open a camera AND ask for the Justice D's real format. Without asking, the APB's /dev/video2
+    gives 640x480 (measured 21 Nov 2026). source: "2", "/dev/video2" or a video file name.
+    Only a camera on Linux is asked for a format; a laptop webcam or a video file is opened as before."""
+    source = str(source)
+    is_cam = source.isdigit() or source.startswith("/dev/video")
+    if not (is_cam and sys.platform.startswith("linux")):
+        return cv2.VideoCapture(int(source) if source.isdigit() else source)
+    cap = cv2.VideoCapture(int(source) if source.isdigit() else source, cv2.CAP_V4L2)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*config.CAMERA_FOURCC))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_SIZE[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_SIZE[1])
+    cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+    return cap
+
+
+def camera_fps(cap, default=None):
+    """The frame rate the driver reports, or `default` when it reports nothing useful (the APB says -1)."""
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    return fps if fps and fps > 0 else default
 
 
 def make_low_latency(cap):

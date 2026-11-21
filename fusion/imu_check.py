@@ -12,7 +12,12 @@
 #   Nadir camera, top of image = nose: when the drone yaws clockwise by psi, the ground
 #   turns counter-clockwise in the image, so the tracker's rotation_deg ~ -(yaw - yaw_home)
 #   (sign verified in tests/test_tracker.py: yaw +6.8 deg -> rot -6.8 deg).
-#   error = wrap(rotation_deg + (yaw - yaw_home)); fail if |error| > IMU_CHECK_MAX_DEG.
+#   error = wrap(rotation_deg + (yaw - yaw_home)); fail if |error - drift| > IMU_CHECK_MAX_DEG.
+#   DRIFT (STAGE 2): the aircraft has no compass, so the flight controller's heading creeps
+#   (measured 0.16 deg/s at rest). `drift` follows the error by at most IMU_CHECK_DRIFT_DEG_S
+#   per second, so a slow creep is absorbed and a sudden jump is still caught.
+#   ponytail: a wrong match that stays wrong for tens of seconds is absorbed too; health.py's
+#   own checks cover that case. Upgrade path: take the heading from the camera itself.
 #
 # WHERE IT PLUGS IN
 #   vision_hold.py, right after health.check(). A disagreement sets quality = -1 for that
@@ -41,11 +46,14 @@ class ImuCheck:
     def __init__(self, max_deg=None):
         self.max_deg = config.IMU_CHECK_MAX_DEG if max_deg is None else max_deg   # read now: --set works
         self.home_yaw = None
+        self.drift = 0.0                               # slow heading creep absorbed so far (deg)
+        self.step = config.IMU_CHECK_DRIFT_DEG_S / config.TARGET_FPS   # most it may move per frame
 
     def set_home(self, yaw_rad):
         """Call when HOME is saved (yaw at that moment, radians). None = no IMU data yet:
         the home yaw is then taken from the first frame that has IMU data (see check)."""
         self.home_yaw = yaw_rad
+        self.drift = 0.0
 
     def check(self, rotation_deg, yaw_rad):
         """Returns (agree, error_deg). Agrees if there's nothing to compare against."""
@@ -55,4 +63,5 @@ class ImuCheck:
             self.home_yaw = yaw_rad + math.radians(rotation_deg)   # check from this frame
             return True, 0.0
         err = wrap_deg(rotation_deg + math.degrees(yaw_rad - self.home_yaw))
-        return abs(err) <= self.max_deg, err
+        self.drift += max(-self.step, min(self.step, err - self.drift))
+        return abs(err - self.drift) <= self.max_deg, err

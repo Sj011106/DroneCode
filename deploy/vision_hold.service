@@ -23,6 +23,8 @@
 # =====================================================================================
 
 [Unit]
+# REVIEW M1: never stop retrying (default: 5 quick failures in 10 s = dead until reboot)
+StartLimitIntervalSec=0
 Description=Vision position hold (GNSS-denied)
 After=network.target msp_sender.service
 

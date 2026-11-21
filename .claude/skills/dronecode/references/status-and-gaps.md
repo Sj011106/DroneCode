@@ -53,6 +53,26 @@ Teammates' files touched on this branch: Saumya - `link/drone_link.py` (baud), `
 Ayush - `config.py`, `preflight.py` (comment), `tests/test_preflight.py`, `tests/test_hold_score.py`;
 Praise - none (`recovery/`, `vision/rehome.py`, `vision/rolling_shutter.py` are Divyanshi's by git log).
 
+## 0b. FIRST REAL MEASUREMENTS on the APB (21 Nov 2026, USB-C, props off)
+
+- Install works: `/data/DroneCode`, venv with system site packages, offline wheels. The board needs
+  `opencv-python-headless` (no libxcb); `requirements.txt` now picks it by platform.
+- Self-tests pass on the board: `test_tracker`, `test_handover`, `test_betaflight`.
+- IIO names are as guessed: `dps310` (`in_pressure_input`), `icm42605-gyro`, `icm42605-accel`.
+  Barometer noise at rest about +-0.3 to 0.6 m. Gyro reads about -0.2 rad/s at rest (display only).
+- Camera: opened without a format request `/dev/video2` gives 640x480. Asked for YUYV 1920x1080 it
+  delivers it, at 31 fps through OpenCV's colour conversion. The driver reports fps as -1.
+  `compute/budget.open_camera()` and `camera_fps()` handle both.
+- Betaflight answers MSP on `/dev/ttymxc2` at 115200 (attitude and 16 channels). Throttle is at
+  index 3 of MSP_RC. Heading drifts about 0.16 deg/s at rest (no compass): `imu_check` now follows
+  slow drift (`IMU_CHECK_DRIFT_DEG_S`).
+- With the radio apparently off, MSP_RC read throttle 885, CH5 1775, the rest 1500. CH5 >= 1500
+  means "armed" to our code (barometer height instead of bench mode): check with the radio on.
+- Not yet confirmed: tilt signs, engage switch, stick directions, start-up time, bench accuracy.
+- Board wall clock is months off after a USB-only boot.
+- Teammate review fixes applied: services never give up (`StartLimitIntervalSec=0`), sender
+  freshness on the monotonic clock, NaN requests ignored.
+
 ## 1. Where the project stands
 Built and passing in simulation (no real hardware yet):
 - the whole vision pipeline: tracker, rolling-shutter correction, tilt cancel, IMU check, height

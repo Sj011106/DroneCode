@@ -45,7 +45,8 @@ def write_spec(path, force=False):
 
 
 def camera_size(source):
-    cap = cv2.VideoCapture(int(source) if source.isdigit() else source)
+    from compute.budget import open_camera                  # STAGE 2: ask for the real format first
+    cap = open_camera(source)
     ok, frame = cap.read() if cap.isOpened() else (False, None)
     cap.release()
     return (frame.shape[1], frame.shape[0]) if ok else None

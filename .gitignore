@@ -4,3 +4,5 @@ __pycache__/
 *.mov
 *.avi
 logs/
+wheels/
+dronecode.tar
