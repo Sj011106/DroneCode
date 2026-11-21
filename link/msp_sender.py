@@ -178,6 +178,7 @@ def main(argv=None):
             print(f"msp_sender: cannot open {args.port} ({e}); retrying", flush=True)
             time.sleep(1.0)
     baro = Baro()
+    baro.start()                                     # reads on a side thread: a read blocks 1-2 s
     print(f"msp_sender: {args.port} at {args.baud}, barometer {'found' if baro.dir else 'NOT found (no height hold)'}", flush=True)
     sender = Sender(port, baro if baro.dir else None)
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

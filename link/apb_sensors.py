@@ -30,6 +30,10 @@
 # =====================================================================================
 import glob
 import os
+import threading
+import time
+
+import config
 
 IIO_ROOT = "/sys/bus/iio/devices"
 
@@ -65,8 +69,32 @@ class Baro:
     def __init__(self, root=IIO_ROOT):
         self.dir = find_device("dps310", root)
         self.p0 = None
+        self._bg, self._p = False, None
+
+    def start(self):
+        """STAGE 2 (measured): one read blocks for 1-2 s on the APB, so anything that must not wait calls
+        this once. A side thread then keeps reading and pressure() returns the newest value at once."""
+        if self.dir is None or self._bg:
+            return
+        for name in ("in_pressure_sampling_frequency", "in_temp_sampling_frequency"):
+            try:                                     # a sensor setting, not GPIO / device tree; gone at reboot
+                if config.BARO_SAMPLING_HZ:
+                    with open(os.path.join(self.dir, name), "w") as f:
+                        f.write(str(config.BARO_SAMPLING_HZ))
+            except OSError:
+                pass
+
+        def loop():
+            while True:
+                self._p = self._measure()
+                time.sleep(0.005)
+        self._bg = True
+        threading.Thread(target=loop, daemon=True).start()
 
     def pressure(self):
+        return self._p if self._bg else self._measure()
+
+    def _measure(self):
         if self.dir is None:
             return None
         p = _read(os.path.join(self.dir, "in_pressure_input"))

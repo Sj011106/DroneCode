@@ -73,6 +73,23 @@ Praise - none (`recovery/`, `vision/rehome.py`, `vision/rolling_shutter.py` are 
 - Teammate review fixes applied: services never give up (`StartLimitIntervalSec=0`), sender
   freshness on the monotonic clock, NaN requests ignored.
 
+### Bench session, 21 Nov 2026 afternoon (REAL, hand-held, props off)
+
+- Barometer: one sysfs read BLOCKS 1-2 s (sensor at 1 Hz). It froze `msp_sender` to 1 message/s. Fixed: side
+  thread + `BARO_SAMPLING_HZ = 16`; measured 50 messages/s afterwards.
+- Camera: first frames after opening are dark; home saved from one gave 64 corners and nothing tracked.
+  Fixed: `CAMERA_WARMUP_S = 1.5` (133-283 corners afterwards).
+- Camera delivers 30 fps (not 60); `read()` waits ~33 ms for the next frame. `CAMERA_THREAD = True` grabs on a
+  side thread: 9 -> 13.4 fps measured. Track stage is 48 ms (LK on 300 points is 27 ms of it).
+- `USE_LEVEL_POINTS` now False: on a real recording it cut trusted frames from 76 to 30 of 125, whatever the
+  tilt signs. Cause: calib.npz is still the datasheet guess (pinhole, no distortion) and the lens bends a lot.
+  Turn it back on only after a real lens calibration and a replay that shows it helps.
+- Scene matters more than the code: bare carpet alone tracks at 93% agreement (with CLAHE; 4 corners without);
+  with the holder's legs, a table and bags in view it drops to 38% and can pick the wrong motion.
+- Lens calibration: `python -m calibration.auto_calibrate 2 --no-window --square <m>` now asks for 1920x1080
+  and prints progress; board picture in `calibration/checkerboard_9x6.png`. NOT done yet.
+- Still open: tilt signs, radio checks (throttle index, TL2, arm), 1 m distance test, start-up time.
+
 ## 1. Where the project stands
 Built and passing in simulation (no real hardware yet):
 - the whole vision pipeline: tracker, rolling-shutter correction, tilt cancel, IMU check, height

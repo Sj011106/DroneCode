@@ -239,6 +239,43 @@ link.on_telemetry(armed)
 assert link.bench_height() is None and abs(link.height(1.0) - 12.0) < 1e-9, "armed: the barometer height is used"
 print("  MANUAL -> POSHOLD on CH10; centred until the new home is saved; then opposes the move; centred when not ready")
 
+import numpy as np                                                  # the camera's raw bytes -> grey picture
+from compute.budget import to_gray
+_w, _h = config.CAMERA_SIZE
+_raw = np.zeros((_h, _w, 2), np.uint8)
+_raw[:, :, 0], _raw[:, :, 1] = 77, 128                              # Y = 77 everywhere, colour bytes 128
+for _f in (_raw, _raw.reshape(1, -1), np.full((_h, _w, 3), 77, np.uint8), np.full((_h, _w), 77, np.uint8)):
+    _g = to_gray(_f)
+    assert _g.shape == (_h, _w) and int(_g.min()) == int(_g.max()) == 77, _f.shape
+print("  raw YUYV (2-channel or flat), colour and grey frames all give the same grey picture")
+
+from compute.budget import LatestFrame as _LF                       # a slow camera must not slow the loop
+class _SlowCam:
+    n = 0
+    def read(self):
+        _time_mod.sleep(0.03); _SlowCam.n += 1
+        return True, _SlowCam.n
+    def release(self): pass
+import time as _time_mod
+_lf = _LF(_SlowCam())
+_time_mod.sleep(0.2)
+_t0 = _time_mod.time(); _ok, _f1 = _lf.read(); _dt = _time_mod.time() - _t0
+_ok, _f2 = _lf.read()
+assert _ok and _dt < 0.01 and _f1 >= 5 and _f2 == _f1 + 1 and _lf.t > 0, (_dt, _f1, _f2)
+_lf.release()
+print("  camera on a side thread: newest frame at once (frame %d after 0.2 s), then the next one, never a repeat" % _f1)
+
+import time as _time                                                # a slow barometer must not slow the caller
+from link.apb_sensors import Baro as _Baro
+_b = _Baro(root="no_such_folder")
+_b.dir = "x"
+_b._measure = lambda: (_time.sleep(0.5), 101.3)[1]                  # like the real one: blocks
+_b.start()
+_time.sleep(0.7)
+_t = _time.time()
+assert _b.pressure() == 101.3 and _time.time() - _t < 0.05
+print("  barometer read that blocks 0.5 s: pressure() answers in under 50 ms")
+
 import preflight                                                    # the GO / NO-GO list's Betaflight check
 no_sleep = lambda s: None
 silent = BetaflightLink()
