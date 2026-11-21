@@ -1,4 +1,4 @@
-from handover import Handover, MANUAL, HOLDING, DEGRADED, FAILSAFE, REANCHOR
+from handover import AutoReanchor, Handover, MANUAL, HOLDING, DEGRADED, FAILSAFE, REANCHOR
 
 
 def run(h, steps):
@@ -97,3 +97,39 @@ def test_gave_up_once_after_max_sends_ignored():
     acts = run(h, steps)
     assert acts.count(("SET_MODE", "LAND")) == 5
     assert acts.count(("GAVE_UP",)) == 1
+
+
+def test_auto_reanchor_fires_after_delay_and_retries():
+    a = AutoReanchor(2.0)
+    assert [a.update(t, False, True) for t in (0.0, 1.0, 1.9)] == [False, False, False]
+    assert a.update(2.0, False, True) is True            # 2 s lost, far from home's scale: save a new home
+    assert a.update(3.0, False, True) is False           # timer restarted
+    assert a.update(4.0, False, True) is True            # still lost: try again
+
+
+def test_auto_reanchor_never_acts_while_engaged():
+    a = AutoReanchor(2.0)
+    assert not any(a.update(t, True, True) for t in range(0, 30))
+
+
+def test_auto_reanchor_resets_when_vision_returns():
+    a = AutoReanchor(2.0)
+    a.update(0.0, False, True)
+    a.update(1.5, False, False)                          # vision came back: timer cleared
+    assert a.update(2.5, False, True) is False           # a new 2 s starts here
+    assert a.update(4.5, False, True) is True
+
+
+def test_auto_reanchor_off_when_zero():
+    a = AutoReanchor(0)
+    assert not any(a.update(t, False, True) for t in range(0, 30))
+
+
+if __name__ == "__main__":
+    # tests.run_all and deploy/install.sh run every file as a script. Without this block they would run ZERO tests
+    # here (pytest finds the test_ functions by itself, a plain `python -m` does not).
+    names = sorted(n for n, f in list(globals().items()) if n.startswith("test_") and callable(f))
+    for n in names:
+        globals()[n]()
+        print("  ok", n)
+    print(f"\nALL HANDOVER TESTS PASSED ({len(names)} tests)")

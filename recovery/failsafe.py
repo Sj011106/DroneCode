@@ -1,3 +1,5 @@
+# NOT USED SINCE PART D: handover.py replaced this module (it only acts while the pilot is in LOITER/POSHOLD).
+# vision_hold.py no longer imports it. Kept only so tests/test_failsafe.py still runs.
 # =====================================================================================
 # recovery/failsafe.py  -  what to do if vision does NOT come back   BRIEF ITEM 3
 # -------------------------------------------------------------------------------------

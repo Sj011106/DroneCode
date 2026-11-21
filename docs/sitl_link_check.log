@@ -16,3 +16,6 @@
 04:18:57    REANCHOR
 04:19:05  4. PASS - no LAND after pilot takeover (sends=[], mode=ALT_HOLD)
 04:19:06  RESULT: 4/4
+NOTE (20 Nov): check 2 in the run above was a search of the source text, not a behavioural test, so its PASS shows nothing.
+      tools/sitl_link_check.py now feeds made-up HEARTBEAT messages through DroneLink.is_autopilot_heartbeat, and
+      tests/test_heartbeat_filter.py does the same offline. Re-run the tool against the simulator to replace this log.

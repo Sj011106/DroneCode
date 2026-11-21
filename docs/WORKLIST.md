@@ -466,7 +466,7 @@ Left for others (found while doing A1–A6):
 | 3 | Which firmware and version is on the flight controller? | Code assumes ArduPilot >= 4.5 | `check_link` |
 | 4 | Which UART links the APB to the flight controller? **ANSWERED (OEM manual):** UART3 = `/dev/ttymxc2`; route with `gpioset -t0 -c gpiochip3 13=1` and `gpioset -t0 -c gpiochip3 0=0`. Still unknown: which `SERIAL*` param on the FC side. | Wrong serial setting can disable the RC receiver | SERIAL* params (not set yet) |
 
-Done: pilot handover (handover.py), failsafe only acts in LOITER/POSHOLD, disengage returns control to the pilot, GPS fallback off. RC7_OPTION = 0 already set.
+Done: pilot handover (handover.py), failsafe only acts in LOITER/POSHOLD, disengage returns control to the pilot, GPS fallback off. RC7_OPTION = 0 already set. New home saved by itself when vision is lost in manual flight (`AutoReanchor`, `tests/test_reanchor.py`), so LOITER can be engaged with no GNSS.
 SITL decision-logic check, 6/6 (`tools/sitl_handover_check.py`, `docs/sitl_handover_check.log`): vehicle disarmed, GPS on, camera simulated. This shows the handover decisions only. Still not shown: an armed, GNSS-denied engage/disengage with the real `vision_hold.py`.
 
 Notes:

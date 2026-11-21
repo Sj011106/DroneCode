@@ -102,6 +102,12 @@ class DroneLink:
         """Seconds since the last autopilot HEARTBEAT (inf if none yet)."""
         return float("inf") if self.mode_time is None else time.monotonic() - self.mode_time
 
+    def is_autopilot_heartbeat(self, msg):
+        """True only for the flight controller's own HEARTBEAT (not a ground station, not our own onboard heartbeat)."""
+        return (msg.get_srcSystem() == self.conn.target_system
+                and msg.type != mavutil.mavlink.MAV_TYPE_GCS
+                and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID)
+
     def start(self):
         print(f"Connecting to {self.conn.address} ...")
         self.send_heartbeat()                # say hello first (needed for UDP links)
@@ -130,9 +136,7 @@ class DroneLink:
             elif kind == "RC_CHANNELS":
                 self.rc = {i: getattr(msg, f"chan{i}_raw") for i in range(1, 17)}
             elif kind == "HEARTBEAT":
-                if (msg.get_srcSystem() == self.conn.target_system
-                        and msg.type != mavutil.mavlink.MAV_TYPE_GCS
-                        and msg.autopilot != mavutil.mavlink.MAV_AUTOPILOT_INVALID):
+                if self.is_autopilot_heartbeat(msg):
                     self.mode_time = time.monotonic()      # only the autopilot's heartbeat
             elif kind == "GPS_GLOBAL_ORIGIN":
                 self.origin_set = True

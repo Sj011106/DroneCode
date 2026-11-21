@@ -26,7 +26,7 @@ venv/bin/pip install -r requirements.txt
 
 echo "--- Self-test on this board ---"
 venv/bin/python -m tests.test_tracker
-venv/bin/python -m tests.test_failsafe
+venv/bin/python -m tests.test_handover
 
 echo "--- Installing (NOT enabling) the boot service ---"
 sed "s|@USER@|$(id -un)|; s|@DIR@|$DIR|g" deploy/vision_hold.service | $SUDO tee /etc/systemd/system/vision_hold.service > /dev/null

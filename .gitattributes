@@ -1,0 +1,5 @@
+# Deploy files are copied to the APB (Linux). A CR at the end of a shell line breaks `sh deploy/install.sh` and can
+# break a systemd unit, so keep them LF on every machine, Windows included (core.autocrlf=true would make them CRLF).
+deploy/* text eol=lf
+*.sh text eol=lf
+*.service text eol=lf
