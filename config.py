@@ -49,6 +49,12 @@ BENCH_HEIGHT_FROM_SCALE = True   # with --fixed-height H: H is the height where 
                              # change with no rangefinder (Stage 2 bench step 4)
 STATUS_LINE_HZ = 5           # print READY / NOT READY + displacement + height change this often (0 = off).
                              # Watch it on the laptop: journalctl -u vision_hold -f
+LIVE_VIEW = True             # STAGE 2 bench "your laptop shows your live estimate": web page served by vision_hold
+                             # (tools/live_view.py). Laptop browser: http://192.168.75.1:8088. Costs nothing when no
+                             # browser is open; the drone never needs it. False = no server at all.
+LIVE_VIEW_PORT = 8088        # change if the journal says "Live view off (... Address already in use)"
+LIVE_VIEW_FPS = 8            # camera pictures per second sent to the browser (JPEG, 640 wide)
+LIVE_VIEW_JPEG_QUALITY = 70
 
 # ---------------- Rolling shutter timing ----------------
 # Used ONLY if timing.npz is missing. calibration/calibrate_timing.py measures the real ones.
