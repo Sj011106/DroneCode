@@ -173,7 +173,8 @@ def vision_hold_running():
         if r.stdout.strip() == "active":
             return True
     if shutil.which("pgrep"):
-        return subprocess.run(["pgrep", "-f", "vision_hold.py"], capture_output=True).returncode == 0
+        return any(subprocess.run(["pgrep", "-f", name], capture_output=True).returncode == 0
+                   for name in ("vision_hold.py", "link.msp_sender"))      # REVIEW S2: the sender owns the port
     return False
 
 

@@ -37,10 +37,13 @@ import time
 import cv2
 import numpy as np
 
+import config
+from compute.budget import open_camera, to_gray
+
 # ---------------- Settings (check these match YOUR checkerboard!) ----------------
 BOARD = (8, 5)           # INNER corners of the checkerboard (columns, rows)
 SQUARE_M = 0.025         # size of one square in metres (2.5 cm). Measure yours!
-WIDTH, HEIGHT = 1280, 720  # Justice D's fixed output; asked for on webcams (the Justice D ignores it)
+WIDTH, HEIGHT = config.CAMERA_SIZE   # STAGE 2: the size we fly at (measured: 1920x1080). Was 1280, 720  # Justice D's fixed output; asked for on webcams (the Justice D ignores it)
 TRY_WIDE_MODEL_ABOVE_PX = 0.5   # normal-model error above this -> also try the rational model
 TARGET_VIEWS = 20        # stop automatically after this many snapshots
 MIN_VIEWS = 10           # fewest snapshots that still give a usable result
@@ -131,10 +134,11 @@ def main():
     args = parser.parse_args()
 
     is_camera = args.source.isdigit() or args.source.startswith("/dev/video")
-    cap = cv2.VideoCapture(int(args.source) if args.source.isdigit() else args.source)
-    if is_camera:   # ask the camera for the flying resolution (fixed-mode cameras ignore it)
+    cap = open_camera(args.source, raw=args.no_window)   # STAGE 2: same format request as vision_hold.py
+    if is_camera:   # a laptop webcam: ask for the flying resolution (the APB was asked by open_camera)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+    last_say = 0.0
 
     # The real-world 3D corner positions of a flat board (z = 0)
     board_points = np.zeros((BOARD[0] * BOARD[1], 3), np.float32)
@@ -150,11 +154,15 @@ def main():
         ok, frame = cap.read()
         if not ok:
             break                                    # video ended / camera unplugged
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = to_gray(frame)
         h, w = gray.shape
         image_size = (w, h)
 
-        found, corners = cv2.findChessboardCornersSB(gray, BOARD)
+        # STAGE 2: search a half-size copy (4x faster on the APB); cornerSubPix below refines at full size
+        k = 2 if w > 1280 else 1
+        found, corners = cv2.findChessboardCornersSB(gray[::k, ::k] if k > 1 else gray, BOARD)
+        if found and k > 1:
+            corners = corners * k
         status = "looking for the board..."
         if found:
             # 1. Held still? (compare with where the corners were in the last frame)
@@ -184,6 +192,9 @@ def main():
         else:
             prev_corners = None
 
+        if args.no_window and time.time() - last_say > 1.5:      # STAGE 2: no screen on the drone, so say it
+            last_say = time.time()
+            print(f"  {len(all_image_points)}/{TARGET_VIEWS}  {status}", flush=True)
         if not args.no_window:
             if found:
                 cv2.drawChessboardCorners(frame, BOARD, corners, found)

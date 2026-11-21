@@ -68,8 +68,12 @@ class Sender:
         self.last = (1500, 1500, config.BF_HOVER_THROTTLE, 1500)
 
     def set_target(self, roll_us, pitch_us, now):
-        """The vision program's request. Only used while fresh and while the pilot has engaged."""
-        self.target, self.target_t = (float(roll_us), float(pitch_us)), now
+        """The vision program's request. Only used while fresh and while the pilot has engaged.
+        `now` must come from the SAME clock as decide()'s `fresh_now` (main: time.monotonic())."""
+        roll_us, pitch_us = float(roll_us), float(pitch_us)
+        if not (math.isfinite(roll_us) and math.isfinite(pitch_us)):     # REVIEW M3: NaN would pass min/max as the cap
+            return
+        self.target, self.target_t = (roll_us, pitch_us), now
 
     def _read(self, now):
         for command, payload in self.parser.feed(self.port.read(4096) or b""):
@@ -102,8 +106,11 @@ class Sender:
             self.alt = new
         self.alt_t = now
 
-    def decide(self, now):
-        """-> (roll, pitch, throttle, yaw) in microseconds for this tick."""
+    def decide(self, now, fresh_now=None):
+        """-> (roll, pitch, throttle, yaw) in microseconds for this tick.
+        REVIEW M2: `fresh_now` (monotonic) judges whether the vision request is still fresh. The wall clock
+        (`now`) jumps on the APB when network time arrives; a backward jump would revive a dead request."""
+        fresh_now = now if fresh_now is None else fresh_now
         rc = self.rc
         engaged = len(rc) >= config.BF_ENGAGE_CHANNEL and rc[config.BF_ENGAGE_CHANNEL - 1] >= config.BF_ENGAGE_PWM
         armed = len(rc) >= config.BF_ARM_CHANNEL and rc[config.BF_ARM_CHANNEL - 1] >= 1500
@@ -120,7 +127,7 @@ class Sender:
         hold = self.hold_throttle if self.hold_throttle is not None else config.BF_HOVER_THROTTLE
 
         roll = pitch = 1500.0
-        if engaged and now - self.target_t <= config.BF_TARGET_TIMEOUT_S:
+        if engaged and 0.0 <= fresh_now - self.target_t <= config.BF_TARGET_TIMEOUT_S:
             most = 500.0 * config.BF_MAX_TILT_DEG / config.BF_ANGLE_LIMIT_DEG    # second cap, whatever was asked
             roll = 1500 + max(-most, min(most, self.target[0] - 1500))
             pitch = 1500 + max(-most, min(most, self.target[1] - 1500))
@@ -130,11 +137,11 @@ class Sender:
         throttle = max(config.BF_THROTTLE_MIN, min(config.BF_THROTTLE_MAX, throttle))
         return round(roll), round(pitch), round(throttle), 1500
 
-    def step(self, now):
+    def step(self, now, fresh_now=None):
         """One 20 ms tick: read, decide, send. Returns what to tell the vision program."""
         try:
             self._read(now)
-            out = self.decide(now)
+            out = self.decide(now, fresh_now)
         except Exception as e:                       # a bug here must never freeze the sticks
             print(f"msp_sender: decision error ({e!r}) - sending centred sticks", flush=True)
             out = (1500, 1500, self.last[2], 1500)
@@ -171,6 +178,7 @@ def main(argv=None):
             print(f"msp_sender: cannot open {args.port} ({e}); retrying", flush=True)
             time.sleep(1.0)
     baro = Baro()
+    baro.start()                                     # reads on a side thread: a read blocks 1-2 s
     print(f"msp_sender: {args.port} at {args.baud}, barometer {'found' if baro.dir else 'NOT found (no height hold)'}", flush=True)
     sender = Sender(port, baro if baro.dir else None)
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -184,11 +192,11 @@ def main(argv=None):
             try:
                 while True:                          # newest request wins
                     msg = json.loads(rx.recv(512))
-                    sender.set_target(msg["roll"], msg["pitch"], now)
+                    sender.set_target(msg["roll"], msg["pitch"], time.monotonic())
             except (BlockingIOError, ValueError, KeyError, TypeError):
                 pass
             try:
-                tele = sender.step(now)
+                tele = sender.step(now, time.monotonic())
             except serial.SerialException as e:      # cable hiccup: keep trying, never exit
                 print(f"msp_sender: serial error ({e})", flush=True)
                 tele = None

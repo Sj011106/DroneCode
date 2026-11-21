@@ -33,6 +33,8 @@
 #   - Mahony, Kumar, Corke, "Multirotor Aerial Vehicles: Modeling, Estimation, and Control
 #     of Quadrotor", IEEE RAM 2012 (small-angle lean -> horizontal acceleration).
 # =====================================================================================
+import math
+
 import config
 
 
@@ -43,6 +45,8 @@ def _clip(x, lim):
 def sticks(forward_m, right_m, v_forward, v_right):
     """Position error and speed in the drone's own axes (metres, m/s; + = forward / right of home)
     -> (roll_us, pitch_us). Stick convention: roll > 1500 leans right, pitch > 1500 leans forward."""
+    if not all(map(math.isfinite, (forward_m, right_m, v_forward, v_right))):   # REVIEW M3
+        return 1500, 1500
     lean_right = _clip(-(config.BF_KP_DEG_PER_M * right_m + config.BF_KD_DEG_PER_MPS * v_right), config.BF_MAX_TILT_DEG)
     lean_fwd = _clip(-(config.BF_KP_DEG_PER_M * forward_m + config.BF_KD_DEG_PER_MPS * v_forward), config.BF_MAX_TILT_DEG)
     per_deg = 500.0 / config.BF_ANGLE_LIMIT_DEG

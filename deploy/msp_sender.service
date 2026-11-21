@@ -18,6 +18,8 @@
 # =====================================================================================
 
 [Unit]
+# REVIEW M1: never stop retrying (default: 5 quick failures in 10 s = dead until reboot)
+StartLimitIntervalSec=0
 Description=Betaflight MSP sender (always-on safe stick output)
 DefaultDependencies=no
 After=local-fs.target

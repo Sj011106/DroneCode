@@ -64,7 +64,7 @@ from pymavlink import mavutil
 # NEW (added on top of Saumya's pipeline; each one can be switched off in config.py):
 import signal
 import config
-from compute.budget import FrameBudget, make_low_latency
+from compute.budget import FrameBudget, LatestFrame, camera_fps, make_low_latency, open_camera, to_gray
 from compute.profiler import Profiler
 from fusion.height import HeightFilter
 from fusion.imu_check import ImuCheck
@@ -175,15 +175,21 @@ def main(argv=None):                                             # NEW: argv for
     link.check_params()
 
     is_camera = (args.camera.isdigit() or args.camera.startswith("/dev/video")) and not replay   # NEW
-    cap = replay.cap if replay else cv2.VideoCapture(int(args.camera) if args.camera.isdigit() else args.camera)
+    cap = replay.cap if replay else open_camera(args.camera, raw=config.CAMERA_RAW_GREY and not args.show)   # STAGE 2
     if not cap.isOpened():
         print(f"Could not open camera/video '{args.camera}'. Check the number or file name.")
         link.running = False
         return
-    frame_gap = 0.0 if is_camera else 1.0 / (cap.get(cv2.CAP_PROP_FPS) or 30)  # play videos in real time
+    frame_gap = 0.0 if is_camera else 1.0 / camera_fps(cap, 30)  # play videos in real time
     if replay:
         frame_gap = 0.0                                          # NEW: replay as fast as possible
     low_latency = is_camera and make_low_latency(cap)            # NEW: no stale frames in the queue
+    if is_camera:                                                # STAGE 2 (measured): the first frames are dark
+        warm_until = time.time() + config.CAMERA_WARMUP_S
+        while time.time() < warm_until:
+            cap.read()
+        if config.CAMERA_THREAD:                                 # STAGE 2 (measured): never wait for the driver
+            cap = LatestFrame(cap, clock)
     if is_camera:                                                # NEW
         print(f"Camera 1-frame queue: {'yes' if low_latency else 'not supported by this backend'}")
 
@@ -204,7 +210,7 @@ def main(argv=None):                                             # NEW: argv for
     recovery = Recovery(tracker)                                 # NEW
     rehome = Rehome()                                            # NEW: new reference while climbing
     prof = Profiler(budget_ms=1000 / config.TARGET_FPS)          # NEW
-    budget = FrameBudget(camera_fps=cap.get(cv2.CAP_PROP_FPS) or None,          # NEW
+    budget = FrameBudget(camera_fps=camera_fps(cap, config.CAMERA_FPS if is_camera else None),   # NEW (STAGE 2: -1 on the APB)
                          queue_len=1 if low_latency else 4)
     home_att = None                                              # NEW: attitude when HOME was saved
     trigger = replay.trigger if replay else HomeTrigger(args.trigger)   # NEW: recorded trigger in replay
@@ -286,7 +292,7 @@ def main(argv=None):                                             # NEW: argv for
             prof.start_frame()                                   # NEW: after the video pacing wait
             t_read = time.time()                                 # NEW: how long read() waits (budget)
             ok, frame = cap.read()
-            t_capture = clock()                                  # NEW: was time.time()
+            t_capture = getattr(cap, "t", 0.0) or clock()         # NEW: was time.time(). STAGE 2: the grab thread's time
             if not ok and is_camera and home_saved:              # Part D: dead camera = quality 0
                 if act_on(handover.update(hclock(), link.conn.flightmode, 0,
                                           mode_fresh=link.mode_age() < 1.5)):
@@ -306,11 +312,12 @@ def main(argv=None):                                             # NEW: argv for
             last_frame_ok = t_capture
             if config.CAMERA_UPSIDE_DOWN:                        # STAGE 2: camera mounted the other way round
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
-            small = downscale(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))   # NEW: PROCESS_WIDTH (APB CPU)
+            small = downscale(to_gray(frame))                    # NEW: PROCESS_WIDTH (APB CPU). STAGE 2: grey directly
             gray = enhance(small)                                # NEW: enhance() = contrast boost
             if not k_scaled:                                     # NEW: lens K for the processed size
-                orig_w = (replay.orig_width if replay else None) or frame.shape[1]
-                orig_h = round(frame.shape[0] * orig_w / frame.shape[1])
+                full_w, full_h = (config.CAMERA_SIZE if frame.ndim == 2 and frame.shape[0] == 1 else frame.shape[1::-1])
+                orig_w = (replay.orig_width if replay else None) or full_w
+                orig_h = round(full_h * orig_w / full_w)
                 K, dist = load_calibration(config.CALIB_FILE, image_size=(orig_w, orig_h))   # size check
                 tracker.dist = dist
                 tracker.K = scale_camera_matrix(K, small.shape[1] / orig_w)
@@ -330,7 +337,7 @@ def main(argv=None):                                             # NEW: argv for
             zero_here.clear()
             if recorder:                                         # NEW: record raw inputs
                 recorder.add(small, t_capture, fired, link.height(t_capture), atts,
-                             orig_size=(frame.shape[1], frame.shape[0]))
+                             orig_size=(orig_w, orig_h))
             if fired:
                 home_pending = True                              # try on this frame and the next ones
             old_ref = dict(tracker.__dict__) if home_pending and home_saved else None   # NEW
@@ -541,7 +548,7 @@ def main(argv=None):                                             # NEW: argv for
                           f"   height change {height - (origin['height'] or height):+5.2f} m   q={quality}{imu}", flush=True)
                 else:
                     print(f"NOT READY  {rep.status}: {'; '.join(rep.reasons) or 'no height'}{imu}", flush=True)
-            if is_camera:                                        # NEW: fell behind -> drop stale frames
+            if is_camera and not isinstance(cap, LatestFrame):   # (the grab thread already drops them)                                        # NEW: fell behind -> drop stale frames
                 for _ in range(budget.frames_to_drop(time.time() - t_capture, t_capture - t_read)):
                     cap.grab()
 

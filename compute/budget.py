@@ -34,9 +34,87 @@
 #   - Linux V4L2 streaming I/O (driver buffer queue): https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/mmap.html
 # =====================================================================================
 
+import sys
+import threading
+import time
+
 import cv2
+import numpy as np
 
 import config
+
+
+def open_camera(source, raw=False):
+    """STAGE 2: open a camera AND ask for the Justice D's real format. Without asking, the APB's /dev/video2
+    gives 640x480 (measured 21 Nov 2026). source: "2", "/dev/video2" or a video file name.
+    Only a camera on Linux is asked for a format; a laptop webcam or a video file is opened as before."""
+    source = str(source)
+    is_cam = source.isdigit() or source.startswith("/dev/video")
+    if not (is_cam and sys.platform.startswith("linux")):
+        return cv2.VideoCapture(int(source) if source.isdigit() else source)
+    cap = cv2.VideoCapture(int(source) if source.isdigit() else source, cv2.CAP_V4L2)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*config.CAMERA_FOURCC))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_SIZE[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_SIZE[1])
+    cap.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+    if raw:                                    # hand us the camera's own YUYV bytes: see to_gray()
+        cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+    return cap
+
+
+def to_gray(frame):
+    """A grey picture from whatever the camera handed over:
+    colour (H, W, 3) -> converted; raw YUYV (H, W, 2) -> its first channel IS the grey picture (free);
+    raw YUYV as one flat row -> reshaped first; already grey -> unchanged."""
+    w, h = config.CAMERA_SIZE
+    if frame.ndim == 3 and frame.shape[2] == 3:
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if frame.ndim == 3 and frame.shape[2] == 2:
+        return np.ascontiguousarray(frame[:, :, 0])
+    if frame.size == w * h * 2 and frame.shape[:2] != (h, w):
+        return np.ascontiguousarray(frame.reshape(h, w, 2)[:, :, 0])
+    return frame if frame.ndim == 2 else frame[:, :, 0]
+
+
+def camera_fps(cap, default=None):
+    """The frame rate the driver reports, or `default` when it reports nothing useful (the APB says -1)."""
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    return fps if fps and fps > 0 else default
+
+
+class LatestFrame:
+    """STAGE 2: a camera whose read() never waits for the driver. A side thread grabs all the time; read()
+    hands over the newest frame not yet seen (waiting only if there is none yet) and `t` is the moment that
+    frame arrived. Everything else (get, set, release...) goes to the real camera."""
+
+    def __init__(self, cap, clock=time.time):
+        self.cap, self.clock, self.t = cap, clock, 0.0
+        self._new, self._item, self._alive = threading.Event(), (False, None, 0.0), True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while self._alive:
+            ok, frame = self.cap.read()
+            self._item = (ok, frame, self.clock())
+            self._new.set()
+            if not ok:
+                time.sleep(0.02)
+
+    def read(self):
+        if not self._new.wait(1.0):                  # camera silent for a second: same as a failed read
+            self.t = self.clock()
+            return False, None
+        self._new.clear()
+        ok, frame, self.t = self._item
+        return ok, frame
+
+    def release(self):
+        self._alive = False
+        time.sleep(0.05)
+        self.cap.release()
+
+    def __getattr__(self, name):
+        return getattr(self.cap, name)
 
 
 def make_low_latency(cap):

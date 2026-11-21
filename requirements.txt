@@ -1,5 +1,6 @@
 numpy
-opencv-python
+opencv-python; platform_machine != "aarch64"            # laptop: with preview windows (--show)
+opencv-python-headless; platform_machine == "aarch64"   # APB: no screen libraries on the board (libxcb missing)
 pymavlink
 pyserial        # link/msp_sender.py (Betaflight route) and serial MAVLink
 matplotlib      # only for tools/analyze_log.py plots

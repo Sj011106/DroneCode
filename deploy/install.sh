@@ -11,7 +11,7 @@
 #   The board has no internet and no compiler: put ready-made library files (aarch64, Python
 #   3.12 "wheels") in a folder called wheels/ next to this repo's requirements.txt; the script
 #   then installs only from that folder. Make it on a laptop WITH internet:
-#       pip download -r requirements.txt -d wheels --only-binary=:all: #           --platform manylinux2014_aarch64 --python-version 3.12
+#       pip download -r requirements.txt -d wheels --only-binary=:all: --platform manylinux2014_aarch64 --python-version 3.12
 #   It creates the Python environment, installs the libraries, runs the quick tests
 #   to make sure everything works on THIS computer, and INSTALLS (but does not enable) the
 #   boot service deploy/vision_hold.service. Enable it only for event day. Safe to rerun.

@@ -15,7 +15,7 @@
 # ---------------- On/off switches (for "with vs without" proof) ----------------
 USE_ROLLING_SHUTTER = True   # vision/rolling_shutter.py: undo the row-by-row warp
 USE_TILT = True              # fusion/tilt.py: remove fake motion caused by roll/pitch
-USE_LEVEL_POINTS = True      # vision/rolling_shutter.py (needs USE_TILT): do it the exact way: turn every tracked
+USE_LEVEL_POINTS = False     # vision/rolling_shutter.py (needs USE_TILT): do it the exact way: turn every tracked
                              # point into what a camera looking STRAIGHT DOWN would see (IMU roll/pitch) BEFORE
                              # matching. With the Justice D's 114 deg lens the old way (match first, subtract one
                              # shift after) goes LOST from 3 deg of tilt. False = the old first-order fix only
@@ -68,6 +68,9 @@ ATTITUDE_MAX_AGE_S = 0.1     # an attitude sample further than this from the fra
 
 # ---------------- IMU cross-check ----------------
 IMU_CHECK_MAX_DEG = 5.0      # vision rotation vs IMU yaw change may differ by at most this
+IMU_CHECK_DRIFT_DEG_S = 0.5  # STAGE 2, MEASURED 21 Nov 2026: with no compass, Betaflight's heading drifts while the
+                             # drone sits still (0.16 deg/s on our aircraft). The check follows a slow drift up to
+                             # this rate and still catches a sudden disagreement. 0 = the old fixed comparison
 
 # ---------------- Height filter ----------------
 HEIGHT_MAX_RATE_MPS = 3.0    # height can't change faster than this (else it's a spike)
@@ -174,6 +177,22 @@ GNSS_DISAGREE_S = 3.0        # ... for this long while vision is trusted -> SPOO
 GNSS_ANCHOR_S = 5.0          # GPS reference point = median of the first 5 s of fixes after home is saved
 GNSS_ALARM_HOLD_S = 10.0     # keep showing SPOOF SUSPECTED this long after the last evidence
 
+# ---------------- Camera format (STAGE 2, MEASURED on the APB 21 Nov 2026) ----------------
+# Opened without asking, /dev/video2 gives 640x480. Asked for YUYV 1920x1080 it delivers 1920x1080.
+# The driver does not report its frame rate (OpenCV returns -1), so we state it here.
+CAMERA_SIZE = (1920, 1080)   # what compute/budget.open_camera() asks a Linux camera for
+CAMERA_FOURCC = "YUYV"
+CAMERA_FPS = 60
+CAMERA_WARMUP_S = 1.5        # MEASURED 21 Nov 2026: the first frames after opening are dark (auto-exposure still
+                             # settling). Home was saved from one of them and nothing could be tracked against
+                             # it. Frames are thrown away for this long before the first one is used
+CAMERA_THREAD = True         # MEASURED: read() always waits ~33 ms for the NEXT frame, on top of our own work
+                             # (9-12 fps in total). True = a side thread keeps grabbing, the main loop takes the
+                             # newest frame with its own capture time. False = the old way
+CAMERA_RAW_GREY = True       # MEASURED: letting OpenCV turn every 1920x1080 frame into colour cost 38 ms a frame
+                             # (12 fps in total). True = take the camera's own grey channel (the Y of YUYV)
+                             # directly. False = the old way
+
 # ---------------- Flight controller route (STAGE 2) ----------------
 # "ardupilot"  = MAVLink ODOMETRY to ArduCopter (link/drone_link.py). Needs the team to flash and tune it.
 # "betaflight" = stick commands over MSP to the firmware the aircraft ships with (link/betaflight_link.py +
@@ -215,6 +234,10 @@ BF_KP_DEG_PER_M = 6.0        # lean per metre of position error
 BF_KD_DEG_PER_MPS = 10.0     # lean per m/s of speed (the brake)
 BF_ROLL_SIGN = 1             # flip to -1 if bench step 5 shows roll pushing WITH the move
 BF_PITCH_SIGN = 1            # flip to -1 if bench step 5 shows pitch pushing WITH the move
+BARO_SAMPLING_HZ = 16        # MEASURED 21 Nov 2026: the APB's barometer is set to 1 reading a second and one
+                             # read BLOCKS for 1-2 s. That froze the sender to 1 message a second. The sender now
+                             # reads it on a side thread and asks the sensor for this rate (lost at reboot).
+                             # 0 = leave the sensor's rate alone
 BF_HEIGHT_HOLD = True        # nudge the throttle to keep the engage height (APB barometer). False = pilot's value
 BF_ALT_KP_US_PER_M = 40.0    # throttle microseconds per metre too low
 BF_ALT_KD_US_PER_MPS = 30.0  # throttle microseconds per m/s of sinking
