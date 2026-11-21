@@ -30,8 +30,8 @@
 # =====================================================================================
 import struct
 
-MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC = 105, 108, 200
-ALLOWED = frozenset({MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC})     # anything else (GPS!) is refused
+MSP_STATUS, MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC = 101, 105, 108, 200
+ALLOWED = frozenset({MSP_STATUS, MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC})     # anything else (GPS!) is refused
 
 
 def frame(command, payload=b""):
@@ -88,6 +88,13 @@ def parse_attitude(payload):
     """-> (roll_deg, pitch_deg, heading_deg) exactly as Betaflight reports them."""
     roll, pitch, heading = struct.unpack("<3h", payload[:6])
     return roll / 10.0, pitch / 10.0, float(heading)
+
+
+def parse_status(payload):
+    """MSP_STATUS -> True if the flight controller says it is ARMED, None if the reply is too short.
+    Bytes 6..9 are the active flight-mode boxes; ARM is box 0. MEASURED 21 Nov 2026: disarmed reads 0
+    even with no radio (when the arm CHANNEL reads 1775). Armed = 1 is from the protocol file, not yet seen."""
+    return bool(struct.unpack_from("<I", payload, 6)[0] & 1) if len(payload) >= 10 else None
 
 
 def parse_rc(payload):

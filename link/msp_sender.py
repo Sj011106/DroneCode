@@ -61,6 +61,7 @@ class Sender:
         self.target, self.target_t = (1500, 1500), -math.inf
         self.rc, self.att, self.yaw = [], None, None
         self.engaged = False
+        self.armed = None                            # what the flight controller itself says (MSP_STATUS); None = not heard
         self.hold_throttle = None                    # the pilot's throttle just before engage
         self.alt = self.alt_t = self.alt_engage = None
         self.climb = 0.0
@@ -86,6 +87,8 @@ class Sender:
                     self.yaw += 0.2 * math.atan2(math.sin(yaw - self.yaw), math.cos(yaw - self.yaw))
                 self.att = (now, math.radians(config.BF_ATT_ROLL_SIGN * roll),
                             math.radians(config.BF_ATT_PITCH_SIGN * pitch), self.yaw)
+            elif command == msp.MSP_STATUS:
+                self.armed = msp.parse_status(payload)
             elif command == msp.MSP_RC:
                 self.rc = msp.parse_rc(payload)
 
@@ -113,7 +116,10 @@ class Sender:
         fresh_now = now if fresh_now is None else fresh_now
         rc = self.rc
         engaged = len(rc) >= config.BF_ENGAGE_CHANNEL and rc[config.BF_ENGAGE_CHANNEL - 1] >= config.BF_ENGAGE_PWM
-        armed = len(rc) >= config.BF_ARM_CHANNEL and rc[config.BF_ARM_CHANNEL - 1] >= 1500
+        # STAGE 2 (measured): with the radio off the arm channel reads 1775 = "armed", so the bench got the noisy
+        # barometer height. Ask the flight controller itself; fall back to the channel only if it has not answered
+        armed = self.armed if self.armed is not None else (len(rc) >= config.BF_ARM_CHANNEL and rc[config.BF_ARM_CHANNEL - 1] >= 1500)
+        self.is_armed = armed
         self._height(now, armed)
         if len(rc) > config.BF_RC_THROTTLE_INDEX:
             pilot = rc[config.BF_RC_THROTTLE_INDEX]
@@ -147,9 +153,11 @@ class Sender:
             out = (1500, 1500, self.last[2], 1500)
         self.last = out
         self.port.write(msp.set_raw_rc(*out) + msp.request(msp.MSP_ATTITUDE)
-                        + (msp.request(msp.MSP_RC) if self.tick % 2 == 0 else b""))
+                        + (msp.request(msp.MSP_RC) if self.tick % 2 == 0 else b"")
+                        + (msp.request(msp.MSP_STATUS) if self.tick % 10 == 5 else b""))
         self.tick += 1
-        return dict(t=now, att=self.att, alt=self.alt, rc=self.rc, engaged=self.engaged, sent=out)
+        return dict(t=now, att=self.att, alt=self.alt, rc=self.rc, engaged=self.engaged, sent=out,
+                    armed=getattr(self, "is_armed", None))
 
     def neutral(self):
         """Centred sticks at the last throttle (used on a clean stop)."""

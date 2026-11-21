@@ -49,6 +49,7 @@ class FakeFC:
         self.sent, self.buf, self._in = [], b"", b""
         self.roll, self.pitch, self.heading = 2.0, -3.0, 90          # degrees, Betaflight's own signs
         self.rc = [1500, 1500, 1500, 1420, 1000, 1500, 1500, 1500, 1500, 1000, 1500, 1500]   # R P Y T, CH5 arm, CH10 engage
+        self.status = None                                           # None = an FC that never answers MSP_STATUS
 
     def write(self, data):
         self._in += data
@@ -63,6 +64,8 @@ class FakeFC:
                 self.buf += reply(command, struct.pack(f"<{len(self.rc)}H", *self.rc))
             elif command == msp.MSP_SET_RAW_RC:
                 self.buf += reply(command, b"")
+            elif command == msp.MSP_STATUS and self.status is not None:
+                self.buf += reply(command, struct.pack("<3HI", 126, 0, 43, self.status) + bytes(16))
 
     def read(self, n):
         out, self.buf = self.buf, b""
@@ -305,10 +308,26 @@ print(f"  pressure 101.325 -> 101.205 kPa = {b.height():.1f} m higher; gyro {g.r
 assert 9.5 < b.height() < 10.5 and abs(pressure_to_height(89.87, 101.325) - 1000) < 15
 assert Baro(os.path.join(root, "nothing")).height() is None and Gyro(os.path.join(root, "nothing")).rates() is None
 
+# MEASURED 21 Nov 2026: radio off -> arm channel 1775, but the flight controller says DISARMED. Its word wins.
+fc4 = FakeFC(); fc4.rc[4] = 1775; fc4.status = 0
+s4 = Sender(fc4, FakeBaro())
+tele4 = None
+for _i in range(30):
+    tele4 = s4.step(1000.0 + _i * 0.02)
+assert tele4["armed"] is False
+bl = BetaflightLink(); bl.on_telemetry(dict(tele4, att=None))
+assert bl.bench_height() == config.BENCH_HEIGHT_M
+fc4.status = 1
+for _i in range(30, 60):
+    tele4 = s4.step(1000.0 + _i * 0.02)
+bl.on_telemetry(dict(tele4, att=None))
+assert tele4["armed"] is True and bl.bench_height() is None
+print("  radio off (arm channel 1775) but FC says disarmed: bench height used; FC says armed: barometer")
+
 print("\nTest 10: nothing we ever sent asked for GNSS (Stage 2 section 04)")
 commands = {c for port in (fc, fc2, s3.port) for c, _ in port.sent}
 print(f"  MSP commands sent in this whole test: {sorted(commands)} (200 sticks, 108 tilt, 105 radio channels)")
-assert commands == {msp.MSP_SET_RAW_RC, msp.MSP_ATTITUDE, msp.MSP_RC}
+assert commands - {msp.MSP_STATUS} == {msp.MSP_SET_RAW_RC, msp.MSP_ATTITUDE, msp.MSP_RC}   # 101 = armed or not
 for port in (fc, fc2, s3.port):
     for c, payload in port.sent:
         if c == msp.MSP_SET_RAW_RC:

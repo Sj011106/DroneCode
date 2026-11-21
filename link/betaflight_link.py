@@ -65,6 +65,7 @@ class BetaflightLink(DroneLink):
         self.acked_source = self.pending_source = None
         self.mode_time = None
         self.engaged = False
+        self.armed = None                                  # STAGE 2: the flight controller's own armed flag, via the sender
         self._wait_reset = None                            # ENGAGE GUARD: reset_counter seen at engage
         self._last_reset = None
         self.last_sticks = NEUTRAL                         # for tests and the log
@@ -79,6 +80,7 @@ class BetaflightLink(DroneLink):
         if tele.get("alt") is not None:
             self.local_z = (tele["t"], -tele["alt"])       # DroneLink.height() reads this (down = +)
         self.rc = {i + 1: v for i, v in enumerate(tele.get("rc") or [])}
+        self.armed = tele.get("armed")
         engaged = bool(tele.get("engaged"))
         if engaged and not self.engaged:
             self._wait_reset = self._last_reset            # centred sticks until the new home is saved
@@ -113,6 +115,8 @@ class BetaflightLink(DroneLink):
     def bench_height(self):
         """STAGE 2 bench: disarmed (CH5 low; props off, a judge carries the aircraft about 1 m up) ->
         config.BENCH_HEIGHT_M. Armed, or no radio data yet -> None (the barometer height is used)."""
+        if self.armed is not None:                         # the sender's answer (flight controller's own flag)
+            return None if self.armed else config.BENCH_HEIGHT_M
         arm = self.rc.get(config.BF_ARM_CHANNEL)
         return config.BENCH_HEIGHT_M if arm is not None and arm < 1500 else None
 
