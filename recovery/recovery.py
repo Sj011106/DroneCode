@@ -24,7 +24,9 @@
 #   - Stage 2 (bench loop + recovery bonus): the FIRST home picture's fingerprints are kept
 #     as well (set_home(origin=True)). find_origin() looks for it; vision_hold.py calls that
 #     now and then while the reference is a later picture, and switches back when found.
-#     Known limit: a floor of identical tiles can match one tile off.
+#     Known limit: a floor of identical tiles can match one tile off. BETAFLIGHT CHANGE: matches must
+#     pass Lowe's ratio test (config.RECOVERY_RATIO): a fingerprint that fits two places about
+#     equally well (identical tiles) is not used. Lowe, IJCV 2004, section 7.1.
 #
 # WHERE IT PLUGS IN
 #   vision_hold.py, after health.check(). Uses tracker.relock(), which Saumya already
@@ -103,7 +105,14 @@ class Recovery:
         kp, des = self.orb.detectAndCompute(gray, None)
         if des is None or len(kp) < self.min_inliers:
             return None, 0
-        matches = self.matcher.match(home_des, des)
+        ratio = getattr(config, "RECOVERY_RATIO", 0)
+        if ratio:                                    # BETAFLIGHT CHANGE: Lowe ratio test (identical floor tiles)
+            if not hasattr(self, "_knn"):
+                self._knn = cv2.BFMatcher(cv2.NORM_HAMMING)
+            pairs = self._knn.knnMatch(home_des, des, k=2)
+            matches = [p[0] for p in pairs if len(p) == 2 and p[0].distance < ratio * p[1].distance]
+        else:
+            matches = self.matcher.match(home_des, des)
         if len(matches) < self.min_inliers:
             return None, 0
         src = home_pts[[m.queryIdx for m in matches]]

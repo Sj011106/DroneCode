@@ -53,12 +53,14 @@ class Rehome:
         self.scale_min = config.REHOME_SCALE_MIN if scale_min is None else scale_min
         self.scale_max = config.REHOME_SCALE_MAX if scale_max is None else scale_max
         self.shift_frac = config.REHOME_SHIFT_FRAC
+        self.peak = 0                     # BETAFLIGHT CHANGE: most agreeing points seen since this reference
         self.reset()
 
     def reset(self):
         """Call when a brand-new HOME is saved."""
         self.offset_n = self.offset_e = 0.0
         self.count = 0
+        self.peak = 0
 
     def total(self, north, east):
         """Position vs the ORIGINAL home."""
@@ -67,11 +69,19 @@ class Rehome:
     def to_origin(self):
         """The reference is the ORIGINAL home picture again (the count of switches is kept)."""
         self.offset_n = self.offset_e = 0.0
+        self.peak = 0
 
-    def due(self, status, res, size=None):
-        """size = picture (width, height) in pixels (None = only the scale trigger, as before)."""
+    def due(self, status, res, size=None, inlier_drop=False):
+        """size = picture (width, height) in pixels (None = only the scale trigger, as before).
+        inlier_drop (BETAFLIGHT CHANGE, bench / not holding): also when the agreeing points fell below
+        REHOME_INLIER_FRAC of the most seen on this reference (the floor is sliding out of view, or under the
+        holder's legs). Never during an engaged hold: each switch freezes in a little error."""
         if status != "OK" or not res.ok:
             return False
+        self.peak = max(self.peak, res.n_inliers)
+        frac = getattr(config, "REHOME_INLIER_FRAC", 0)
+        if inlier_drop and frac and self.peak >= 40 and res.n_inliers < frac * self.peak:
+            return True
         if not self.scale_min <= res.scale <= self.scale_max:
             return True
         if not size or not self.shift_frac:
@@ -86,6 +96,7 @@ class Rehome:
             tracker.__dict__.update(saved)                # not enough texture: keep the old one
             return False
         self.offset_n, self.offset_e = north_total, east_total
+        self.peak = 0
         health.prev_shift, health.prev_shift_t = (0.0, 0.0), t_capture
         self.count += 1
         return True

@@ -44,7 +44,7 @@ venv/bin/python -m tests.test_handover
 venv/bin/python -m tests.test_betaflight
 
 echo "--- Installing (NOT enabling) the boot services ---"
-for unit in vision_hold msp_sender; do
+for unit in vision_hold msp_sender front_view; do
     sed "s|@USER@|$(id -un)|; s|@DIR@|$DIR|g" deploy/$unit.service | $SUDO tee /etc/systemd/system/$unit.service > /dev/null
 done
 $SUDO systemctl daemon-reload
@@ -52,4 +52,5 @@ echo "Installed. Betaflight (stock):   $SUDO systemctl enable --now msp_sender v
 echo "ArduCopter (if flashed):         edit ExecStart in deploy/vision_hold.service, rerun this, enable vision_hold only"
 echo "Before ANY manual run:           $SUDO systemctl stop vision_hold msp_sender"
 echo "Watch the live estimate:         journalctl -u vision_hold -f"
+echo "Front camera (optional):         venv/bin/python -m tools.front_cam   then, if working: $SUDO systemctl enable --now front_view"
 echo "Benchmark this board:            venv/bin/python -m compute.benchmark"

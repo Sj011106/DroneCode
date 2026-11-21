@@ -136,8 +136,8 @@ add("WARN" if sends_no_data else "ok", "silent when not ready",
     "vision_hold still sends ODOMETRY (zeros, quality -1) when not ready (bench D/E1 on ArduCopter: 'no position')"
     if sends_no_data else "ArduCopter: nothing is sent when not ready; Betaflight: centred sticks")
 lvl = setting(cfg, "USE_LEVEL_POINTS")
-add("ok" if lvl == "True" else "FAIL", "wide-lens tilt fix (level points)",
-    f"config.USE_LEVEL_POINTS = {lvl}: without it the 114 deg lens loses tracking from about 3 deg of lean")
+add("ok" if lvl == "True" else "WARN", "wide-lens tilt fix (level points)",
+    f"config.USE_LEVEL_POINTS = {lvl}: simulation says it is needed from about 3 deg of lean, but on the real camera (21 Nov) it made tracking worse until the lens edges are calibrated")
 missing = [t for t in ("test_bench", "test_level", "test_betaflight") if not os.path.exists(os.path.join(repo, "tests", t + ".py"))]
 add("WARN" if missing else "ok", "Stage 2 rehearsal tests present", ", ".join(missing) + " missing" if missing else "test_bench, test_level, test_betaflight")
 

@@ -38,6 +38,9 @@ REHOME_SHIFT_FRAC = 0.25     # Stage 2 bench: the picture slid by this fraction 
                              # reference too (at 1 m a 1.5 m carry takes the first picture out of view).
                              # In flight this is 4.3 m or more from 10 m up, outside the 3 m hold limit, so a
                              # hold that is still scoring never triggers it. 0 = off
+REHOME_INLIER_FRAC = 0.4     # BETAFLIGHT CHANGE: (not while holding) also re-home when the agreeing points fall below
+                             # this share of the most seen on the current reference: the floor is sliding out of view
+                             # or under the holder's legs before the picture has slid REHOME_SHIFT_FRAC. 0 = off
 USE_ORIGIN_RETURN = True     # after re-homes: when the FIRST home picture is in view again, measure against it
                              # again (drift collected on the way is removed). Bench loop + recovery bonus
 ORIGIN_CHECK_EVERY_N = 15    # look for the first home every Nth frame (ORB, ~10-20 ms) while away from it
@@ -198,6 +201,34 @@ CAMERA_THREAD = True         # MEASURED: read() always waits ~33 ms for the NEXT
 CAMERA_RAW_GREY = True       # MEASURED: letting OpenCV turn every 1920x1080 frame into colour cost 38 ms a frame
                              # (12 fps in total). True = take the camera's own grey channel (the Y of YUYV)
                              # directly. False = the old way
+CAMERA_BUFFERS_WITH_THREAD = 4   # driver queue length when CAMERA_THREAD is on. With ONE buffer the driver has
+                             # nowhere to put the next picture while we hold the current one and drops it (our
+                             # guess for the measured "read() always waits ~33 ms" = 30 of 60 pictures a second).
+                             # The grab thread empties the queue all the time, so 4 is never stale.
+                             # MEASURE: python -m tools.blur_check --tag buf1 --buffers 1  vs  --buffers 4
+CAMERA_DRIVER_TIMESTAMP = True   # True = a picture's time comes from the camera driver (V4L2 buffer time = end of
+                             # the picture, Stage 2 section 02), moved back by READOUT_S / 2 to the middle row.
+                             # False = the moment our grab thread received it (later by the camera latency).
+                             # Falls back by itself when the driver's clock is not time.monotonic.
+
+# ---------------- Blur (STAGE 2, vision/sharpness.py; docs/CAMERAS.md) ----------------
+HOME_SHARPEST = True         # when home is due, wait for a picture at least HOME_SHARP_RATIO as sharp as usual ...
+HOME_SHARP_RATIO = 0.6
+HOME_SHARP_MAX_WAIT_FRAMES = 8   # ... but never longer than this many pictures (~0.6 s at 13 fps)
+BLUR_SKIP_RATIO = None       # e.g. 0.4: do not measure from a picture this much blurrier than usual. None = off.
+                             # Turn on only if tools/blur_check.py shows sharpness falling with turn rate.
+BLUR_SKIP_MAX_IN_A_ROW = 2   # never skip more pictures than this in a row (the sender keeps the last request)
+
+# ---------------- High-altitude picture (STAGE 2, vision/process_mode.py) ----------------
+HIGH_ALT_CROP_FROM_M = None  # e.g. 15.0: engaged at or above this barometer height -> track a FULL-RESOLUTION crop
+                             # of the lens centre instead of the 640-wide whole picture (sharper ground, and only
+                             # the calibrated part of the lens). Chosen once per engage. None = off (not flown yet)
+HIGH_ALT_CROP_SIZE = (960, 960)  # crop width, height in full-resolution pixels (~4x the work of 640x360)
+
+# ---------------- Front camera (STAGE 2, vision/front_camera.py; optional, NOT used by the hold) ----------------
+FRONT_CAMERA_DEVICE = "/dev/video3"   # Justice A through the ADV7282 decoder: 720x576 PAL, interlaced
+FRONT_CAMERA_FORMAT = "UYVY"          # the decoder's own byte order. tools/front_cam.py --fmt YUYV if it looks wrong
+FRONT_VIEW_PORT = 8089                # its browser view (the down camera's stays on LIVE_VIEW_PORT)
 
 # ---------------- Flight controller route (STAGE 2) ----------------
 # "ardupilot"  = MAVLink ODOMETRY to ArduCopter (link/drone_link.py). Needs the team to flash and tune it.
@@ -235,9 +266,35 @@ BF_ATT_PITCH_SIGN = -1       # Betaflight reports nose DOWN as + (our reading of
 # ---------------- Betaflight route: controller. EVERY NUMBER IS A STARTING GUESS, tune on the aircraft ----------------
 BF_ANGLE_LIMIT_DEG = 60.0    # Betaflight `angle_limit`: degrees of lean at full stick. ASK THE CREW for the real
                              # value (do not plug in our own Configurator: the manual warns it can reset the FC)
-BF_MAX_TILT_DEG = 8.0        # we never ask for more lean than this (also enforced again inside the sender)
+# BETAFLIGHT CHANGE: Betaflight's ANGLE mode sends the stick through the pilot's RATES curve before it becomes a
+# lean (link/stick_curve.py). The old straight line (lean = angle_limit * stick) was 2-3x too strong a guess: our
+# 8 deg came out as ~2 deg. ASK THE CREW for these (CLI, read only: get rates_type / roll_rc_rate / roll_srate /
+# roll_expo / deadband). Defaults = Betaflight's own defaults for Actual rates. `python -m link.stick_curve` prints
+# the stick value it will send for each lean.
+BF_RATES_TYPE = "ACTUAL"     # "ACTUAL" or "BETAFLIGHT"
+BF_RC_RATE = 7               # ACTUAL: centre sensitivity/10 (7 = 70 deg/s). BETAFLIGHT: rc_rate x100 (100 = 1.00)
+BF_SRATE = 67                # ACTUAL: max rate/10 (67 = 670 deg/s).        BETAFLIGHT: super rate x100 (70 = 0.70)
+BF_EXPO = 0                  # x100 (54 = 0.54)
+BF_DEADBAND_US = 0           # Betaflight `deadband`
+BF_MAX_TILT_DEG = 15.0       # BETAFLIGHT CHANGE (was 8): we never ask for more lean than this (also enforced again
+                             # inside the sender, in DEGREES through the curve). Holding against wind needs about
+                             # atan(0.28 * wind / 9.81): 8 deg holds only ~5 m/s; 15 deg ~9 m/s (wind simulation)
+BF_MAX_TILT_RATE_DEG_S = 40.0    # STAGE 2 (blur): our lean request may change by at most this many degrees a
+                             # second (0 -> 8 deg in 0.2 s), measured in DEGREES through the stick curve. Every jerk of ours turns the drone while a picture
+                             # is taken and smears it (the camera has no exposure control). Not ready -> centred
+                             # AT ONCE, never slowly. None = no limit (the old way)
 BF_KP_DEG_PER_M = 6.0        # lean per metre of position error
 BF_KD_DEG_PER_MPS = 10.0     # lean per m/s of speed (the brake)
+BF_KI_DEG_PER_M_S = 1.0      # BETAFLIGHT CHANGE: lean added per metre per second of steady error (wind). It STARTS
+                             # at the lean the pilot was holding at the engage moment (that lean is what holds the
+                             # aircraft against the wind), so engaging is smooth and there is no wind offset.
+                             # 0 = the old PD only. Frozen while disarmed (bench: clean step 5 response)
+BF_ENGAGE_OFF_PWM = 1700     # BETAFLIGHT CHANGE: the switch counts as OFF again only below this (hysteresis: a
+                             # reading wobbling around 1800 must not engage/disengage/re-home over and over)
+BF_AUX_US = 1000             # BETAFLIGHT CHANGE (was 1500): AUX1-4 in our stick message. The FC ignores them while
+                             # msp_override_channels_mask = 15. If that mask were ever wrong and covered the ARM
+                             # channel, 1500 could ARM the aircraft; 1000 can only DISARM it, which shows at once on
+                             # the props-off bench (engage -> disarms) instead of silently in the air
 BF_ROLL_SIGN = 1             # flip to -1 if bench step 5 shows roll pushing WITH the move
 BF_PITCH_SIGN = 1            # flip to -1 if bench step 5 shows pitch pushing WITH the move
 BARO_SAMPLING_HZ = 16        # MEASURED 21 Nov 2026: the APB's barometer is set to 1 reading a second and one
@@ -247,8 +304,54 @@ BARO_SAMPLING_HZ = 16        # MEASURED 21 Nov 2026: the APB's barometer is set 
 BF_HEIGHT_HOLD = True        # nudge the throttle to keep the engage height (APB barometer). False = pilot's value
 BF_ALT_KP_US_PER_M = 40.0    # throttle microseconds per metre too low
 BF_ALT_KD_US_PER_MPS = 30.0  # throttle microseconds per m/s of sinking
+BF_ALT_KI_US_PER_M_S = 4.0   # BETAFLIGHT CHANGE: throttle added per metre per second of steady error (the battery
+                             # sags during a hold, so the same throttle slowly gives less lift). 0 = old PD only
+BF_CLIMB_SMOOTH_S = 0.5      # BETAFLIGHT CHANGE: climb rate smoothed over this long. The APB barometer is noisy
+                             # (measured +-0.3-0.6 m at rest), and its raw rate of change made the throttle twitch
 BF_THROTTLE_AUTHORITY = 50   # the height hold may move the throttle at most this far from the pilot's value.
                              # Small on purpose: 1.36 kg on 10" props hovers low and reacts strongly
 BF_HOVER_THROTTLE = 1300     # ONLY used if we have never seen the pilot's throttle. MEASURE at check-in
 BF_THROTTLE_MIN = 1100       # we never send less (Stage 2: "never minimum values") ...
 BF_THROTTLE_MAX = 1800       # ... or more than this
+
+# ---------------- Betaflight route: sensing without GNSS (BETAFLIGHT CHANGES) ----------------
+BF_HEADING_FROM_VISION = True   # The aircraft has no compass, so Betaflight corrects its heading with GPS COURSE
+                             # OVER GROUND whenever it moves faster than 2 m/s (imu.c, used by GPS Rescue). That
+                             # heading is "GPS-aided state" (Stage 2 section 04) and would also cost the GNSS-free
+                             # bonus. True = our heading comes from the camera only: the rotation the tracker
+                             # measures against the home picture, chained across re-homes. Betaflight's heading is
+                             # not used anywhere. False = the old way (Betaflight's heading)
+BF_RAW_IMU = True            # ask Betaflight for its RAW accelerometer and gyro (MSP_RAW_IMU, 102): plain sensor
+                             # readings, never mixed with GPS. Used to know "are we being moved?" (frozen-point
+                             # filter), for the yaw cross-check and for the optional height-from-motion estimate
+BF_RAW_IMU_EVERY = 2         # ask every Nth sender tick (2 = 25 Hz; the link has room: ~4 kB/s of 11.5 kB/s)
+BF_GYRO_YAW_SIGN = 0         # +1 / -1 once checked, 0 = not checked yet (then the yaw cross-check is skipped on
+                             # Betaflight). CHECK: --monitor, turn the drone RIGHT (clockwise seen from above):
+                             # the 3rd gyro number must go + for +1, - for -1
+BF_ACC_1G = 2048            # Betaflight's raw accelerometer units per g for the ICM-426xx (+-16 g). CHECK: at rest
+                             # `python -m link.msp_sender --monitor` must show |acc| close to 1.0 g
+FROZEN_FILTER = True         # vision/frozen.py: on the BENCH (disarmed) ignore tracked points that stay still in the
+                             # picture while the IMU says we are being carried: the holder's shoes, legs, hands,
+                             # shadow, the drone's own legs. MEASURED 21 Nov: legs + table + bags in view cut the
+                             # agreeing points to 38% and could pick the wrong motion
+CORNERS_PER_CELL = True      # vision/tracker.py: after the usual corner search, a 4x4 cell that got under a third of
+                             # its share is searched again on its OWN strength scale. The usual search takes the
+                             # strongest corners of the whole picture first: a strongly textured patch (trousers,
+                             # shoes, a bag) could take them ALL and leave a plain floor none. False = the old way
+FROZEN_WINDOW_S = 0.4       # a point must stay still this long ...
+FROZEN_STILL_PX = 1.0        # ... within this many pixels (640-wide picture) ...
+FROZEN_MOVING_ACC = 0.25     # ... while the accelerometer wobbles at least this much (m/s^2, RMS over the window)
+VIO_HEIGHT = False           # fusion/scale.py: OFF until checked. Bench height from motion: the accelerometer feels
+                             # each sway in metres, the camera sees it in "heights"; the ratio is the height above
+                             # the floor. Turn on after a rehearsal shows its printed estimate matches a tape-
+                             # measured height (status line shows "vio h=..." either way)
+VIO_HEIGHT_MIN_M, VIO_HEIGHT_MAX_M = 0.5, 2.0   # never believe a bench height outside this
+
+# ---------------- Board heat (BETAFLIGHT CHANGE: compute/thermal.py) ----------------
+THERMAL_FILE = "/sys/class/thermal/thermal_zone0/temp"
+THERMAL_SLOW_C = 80          # above this: process every 2nd frame (vision ~1 core -> ~0.5 core)
+THERMAL_HOT_C = 88           # above this: every 3rd frame and no ORB searches. The sender is never slowed
+                             # (APB manual: the fan holds ~62 C, the board shuts down at 95 C)
+RECOVERY_RATIO = 0.8         # BETAFLIGHT CHANGE (recovery/recovery.py): a fingerprint match counts only if it is
+                             # clearly better than the second best (Lowe ratio test). On a floor of identical tiles
+                             # every tile looks alike; the old cross-check could lock on one tile off. 0 = old way

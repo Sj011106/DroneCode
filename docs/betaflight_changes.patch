@@ -1,0 +1,2335 @@
+diff --git a/README.md b/README.md
+index 79a4228..f67adb4 100644
+--- a/README.md
++++ b/README.md
+@@ -10,6 +10,11 @@ switch** (CH10), and from that moment our code holds the position until the pilo
+ > aircraft ships with. The ArduCopter route stays in the code as an unused fallback (`--fc ardupilot`).
+ > **Every number in this file is simulated.** Nothing has run on the real aircraft or the APB yet.
+ > What must be checked on the real hardware first is listed in [section 9](#9-status-and-what-is-still-open).
++>
++> **Betaflight changes (21 Nov, local copy, not pushed):** Betaflight's real stick curve, an I term that starts at
++> the pilot's lean, heading from the camera (Betaflight's heading is GPS-corrected), AUX off, engage hysteresis,
++> a sender watchdog, bench protection against the holder's legs, optional height from motion, a heat guard.
++> What changed, why, and what to check on the aircraft: [docs/BETAFLIGHT_CHANGES.md](docs/BETAFLIGHT_CHANGES.md).
+ 
+ ---
+ 
+diff --git a/compute/thermal.py b/compute/thermal.py
+new file mode 100644
+index 0000000..aff108f
+--- /dev/null
++++ b/compute/thermal.py
+@@ -0,0 +1,49 @@
++# =====================================================================================
++# compute/thermal.py  -  do less work when the board gets hot              BETAFLIGHT CHANGE
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   The APB's fan holds about 62 C and the board switches itself off at 95 C (APB manual
++#   p.11). Our vision program is the biggest load (~1 of the 4 cores at ~13 frames a
++#   second). If the board ever gets hot (sun on the field, long bench session), we would
++#   rather track fewer frames than lose the board in the air. Above THERMAL_SLOW_C we use
++#   every 2nd frame; above THERMAL_HOT_C every 3rd and skip the expensive ORB searches.
++#   Prototype simulation: the hold still qualified at every level with vision at 10 frames
++#   a second, because the controller damps between frames. The stick sender is a separate
++#   program and is never slowed down.
++#
++# HOW IT WORKS: reads /sys/class/thermal/thermal_zone0/temp (milli-degrees C) at most once a
++#   second. No file (laptop) -> always 1 (full rate). Proof: tests/test_thermal.py.
++# =====================================================================================
++import time
++
++import config
++
++
++class Thermal:
++    def __init__(self, path=None, clock=time.monotonic):
++        self.path = path or config.THERMAL_FILE
++        self.clock = clock
++        self.t = -1e9
++        self.temp_c = None
++        self.every = 1
++
++    def read(self):
++        try:
++            with open(self.path) as f:
++                v = float(f.read().strip())
++            return v / 1000.0 if v > 1000 else v
++        except (OSError, ValueError):
++            return None
++
++    def frame_every(self):
++        """Process every Nth frame: 1 (normal), 2 (hot), 3 (very hot)."""
++        now = self.clock()
++        if now - self.t >= 1.0:
++            self.t = now
++            self.temp_c = self.read()
++            c = self.temp_c
++            self.every = 1 if c is None or c < config.THERMAL_SLOW_C else (2 if c < config.THERMAL_HOT_C else 3)
++        return self.every
++
++    def allow_orb(self):
++        return self.every < 3
+diff --git a/config.py b/config.py
+index 605b05a..3cb9699 100644
+--- a/config.py
++++ b/config.py
+@@ -38,6 +38,9 @@ REHOME_SHIFT_FRAC = 0.25     # Stage 2 bench: the picture slid by this fraction
+                              # reference too (at 1 m a 1.5 m carry takes the first picture out of view).
+                              # In flight this is 4.3 m or more from 10 m up, outside the 3 m hold limit, so a
+                              # hold that is still scoring never triggers it. 0 = off
++REHOME_INLIER_FRAC = 0.4     # BETAFLIGHT CHANGE: (not while holding) also re-home when the agreeing points fall below
++                             # this share of the most seen on the current reference: the floor is sliding out of view
++                             # or under the holder's legs before the picture has slid REHOME_SHIFT_FRAC. 0 = off
+ USE_ORIGIN_RETURN = True     # after re-homes: when the FIRST home picture is in view again, measure against it
+                              # again (drift collected on the way is removed). Bench loop + recovery bonus
+ ORIGIN_CHECK_EVERY_N = 15    # look for the first home every Nth frame (ORB, ~10-20 ms) while away from it
+@@ -229,9 +232,31 @@ BF_ATT_PITCH_SIGN = -1       # Betaflight reports nose DOWN as + (our reading of
+ # ---------------- Betaflight route: controller. EVERY NUMBER IS A STARTING GUESS, tune on the aircraft ----------------
+ BF_ANGLE_LIMIT_DEG = 60.0    # Betaflight `angle_limit`: degrees of lean at full stick. ASK THE CREW for the real
+                              # value (do not plug in our own Configurator: the manual warns it can reset the FC)
+-BF_MAX_TILT_DEG = 8.0        # we never ask for more lean than this (also enforced again inside the sender)
++# BETAFLIGHT CHANGE: Betaflight's ANGLE mode sends the stick through the pilot's RATES curve before it becomes a
++# lean (link/stick_curve.py). The old straight line (lean = angle_limit * stick) was 2-3x too strong a guess: our
++# 8 deg came out as ~2 deg. ASK THE CREW for these (CLI, read only: get rates_type / roll_rc_rate / roll_srate /
++# roll_expo / deadband). Defaults = Betaflight's own defaults for Actual rates. `python -m link.stick_curve` prints
++# the stick value it will send for each lean.
++BF_RATES_TYPE = "ACTUAL"     # "ACTUAL" or "BETAFLIGHT"
++BF_RC_RATE = 7               # ACTUAL: centre sensitivity/10 (7 = 70 deg/s). BETAFLIGHT: rc_rate x100 (100 = 1.00)
++BF_SRATE = 67                # ACTUAL: max rate/10 (67 = 670 deg/s).        BETAFLIGHT: super rate x100 (70 = 0.70)
++BF_EXPO = 0                  # x100 (54 = 0.54)
++BF_DEADBAND_US = 0           # Betaflight `deadband`
++BF_MAX_TILT_DEG = 15.0       # BETAFLIGHT CHANGE (was 8): we never ask for more lean than this (also enforced again
++                             # inside the sender, in DEGREES through the curve). Holding against wind needs about
++                             # atan(0.28 * wind / 9.81): 8 deg holds only ~5 m/s; 15 deg ~9 m/s (wind simulation)
+ BF_KP_DEG_PER_M = 6.0        # lean per metre of position error
+ BF_KD_DEG_PER_MPS = 10.0     # lean per m/s of speed (the brake)
++BF_KI_DEG_PER_M_S = 1.0      # BETAFLIGHT CHANGE: lean added per metre per second of steady error (wind). It STARTS
++                             # at the lean the pilot was holding at the engage moment (that lean is what holds the
++                             # aircraft against the wind), so engaging is smooth and there is no wind offset.
++                             # 0 = the old PD only. Frozen while disarmed (bench: clean step 5 response)
++BF_ENGAGE_OFF_PWM = 1700     # BETAFLIGHT CHANGE: the switch counts as OFF again only below this (hysteresis: a
++                             # reading wobbling around 1800 must not engage/disengage/re-home over and over)
++BF_AUX_US = 1000             # BETAFLIGHT CHANGE (was 1500): AUX1-4 in our stick message. The FC ignores them while
++                             # msp_override_channels_mask = 15. If that mask were ever wrong and covered the ARM
++                             # channel, 1500 could ARM the aircraft; 1000 can only DISARM it, which shows at once on
++                             # the props-off bench (engage -> disarms) instead of silently in the air
+ BF_ROLL_SIGN = 1             # flip to -1 if bench step 5 shows roll pushing WITH the move
+ BF_PITCH_SIGN = 1            # flip to -1 if bench step 5 shows pitch pushing WITH the move
+ BARO_SAMPLING_HZ = 16        # MEASURED 21 Nov 2026: the APB's barometer is set to 1 reading a second and one
+@@ -241,8 +266,54 @@ BARO_SAMPLING_HZ = 16        # MEASURED 21 Nov 2026: the APB's barometer is set
+ BF_HEIGHT_HOLD = True        # nudge the throttle to keep the engage height (APB barometer). False = pilot's value
+ BF_ALT_KP_US_PER_M = 40.0    # throttle microseconds per metre too low
+ BF_ALT_KD_US_PER_MPS = 30.0  # throttle microseconds per m/s of sinking
++BF_ALT_KI_US_PER_M_S = 4.0   # BETAFLIGHT CHANGE: throttle added per metre per second of steady error (the battery
++                             # sags during a hold, so the same throttle slowly gives less lift). 0 = old PD only
++BF_CLIMB_SMOOTH_S = 0.5      # BETAFLIGHT CHANGE: climb rate smoothed over this long. The APB barometer is noisy
++                             # (measured +-0.3-0.6 m at rest), and its raw rate of change made the throttle twitch
+ BF_THROTTLE_AUTHORITY = 50   # the height hold may move the throttle at most this far from the pilot's value.
+                              # Small on purpose: 1.36 kg on 10" props hovers low and reacts strongly
+ BF_HOVER_THROTTLE = 1300     # ONLY used if we have never seen the pilot's throttle. MEASURE at check-in
+ BF_THROTTLE_MIN = 1100       # we never send less (Stage 2: "never minimum values") ...
+ BF_THROTTLE_MAX = 1800       # ... or more than this
++
++# ---------------- Betaflight route: sensing without GNSS (BETAFLIGHT CHANGES) ----------------
++BF_HEADING_FROM_VISION = True   # The aircraft has no compass, so Betaflight corrects its heading with GPS COURSE
++                             # OVER GROUND whenever it moves faster than 2 m/s (imu.c, used by GPS Rescue). That
++                             # heading is "GPS-aided state" (Stage 2 section 04) and would also cost the GNSS-free
++                             # bonus. True = our heading comes from the camera only: the rotation the tracker
++                             # measures against the home picture, chained across re-homes. Betaflight's heading is
++                             # not used anywhere. False = the old way (Betaflight's heading)
++BF_RAW_IMU = True            # ask Betaflight for its RAW accelerometer and gyro (MSP_RAW_IMU, 102): plain sensor
++                             # readings, never mixed with GPS. Used to know "are we being moved?" (frozen-point
++                             # filter), for the yaw cross-check and for the optional height-from-motion estimate
++BF_RAW_IMU_EVERY = 2         # ask every Nth sender tick (2 = 25 Hz; the link has room: ~4 kB/s of 11.5 kB/s)
++BF_GYRO_YAW_SIGN = 0         # +1 / -1 once checked, 0 = not checked yet (then the yaw cross-check is skipped on
++                             # Betaflight). CHECK: --monitor, turn the drone RIGHT (clockwise seen from above):
++                             # the 3rd gyro number must go + for +1, - for -1
++BF_ACC_1G = 2048            # Betaflight's raw accelerometer units per g for the ICM-426xx (+-16 g). CHECK: at rest
++                             # `python -m link.msp_sender --monitor` must show |acc| close to 1.0 g
++FROZEN_FILTER = True         # vision/frozen.py: on the BENCH (disarmed) ignore tracked points that stay still in the
++                             # picture while the IMU says we are being carried: the holder's shoes, legs, hands,
++                             # shadow, the drone's own legs. MEASURED 21 Nov: legs + table + bags in view cut the
++                             # agreeing points to 38% and could pick the wrong motion
++CORNERS_PER_CELL = True      # vision/tracker.py: after the usual corner search, a 4x4 cell that got under a third of
++                             # its share is searched again on its OWN strength scale. The usual search takes the
++                             # strongest corners of the whole picture first: a strongly textured patch (trousers,
++                             # shoes, a bag) could take them ALL and leave a plain floor none. False = the old way
++FROZEN_WINDOW_S = 0.4       # a point must stay still this long ...
++FROZEN_STILL_PX = 1.0        # ... within this many pixels (640-wide picture) ...
++FROZEN_MOVING_ACC = 0.25     # ... while the accelerometer wobbles at least this much (m/s^2, RMS over the window)
++VIO_HEIGHT = False           # fusion/scale.py: OFF until checked. Bench height from motion: the accelerometer feels
++                             # each sway in metres, the camera sees it in "heights"; the ratio is the height above
++                             # the floor. Turn on after a rehearsal shows its printed estimate matches a tape-
++                             # measured height (status line shows "vio h=..." either way)
++VIO_HEIGHT_MIN_M, VIO_HEIGHT_MAX_M = 0.5, 2.0   # never believe a bench height outside this
++
++# ---------------- Board heat (BETAFLIGHT CHANGE: compute/thermal.py) ----------------
++THERMAL_FILE = "/sys/class/thermal/thermal_zone0/temp"
++THERMAL_SLOW_C = 80          # above this: process every 2nd frame (vision ~1 core -> ~0.5 core)
++THERMAL_HOT_C = 88           # above this: every 3rd frame and no ORB searches. The sender is never slowed
++                             # (APB manual: the fan holds ~62 C, the board shuts down at 95 C)
++RECOVERY_RATIO = 0.8         # BETAFLIGHT CHANGE (recovery/recovery.py): a fingerprint match counts only if it is
++                             # clearly better than the second best (Lowe ratio test). On a floor of identical tiles
++                             # every tile looks alike; the old cross-check could lock on one tile off. 0 = old way
+diff --git a/deploy/msp_sender.service b/deploy/msp_sender.service
+index cfe0094..3064354 100644
+--- a/deploy/msp_sender.service
++++ b/deploy/msp_sender.service
+@@ -32,6 +32,12 @@ ExecStart=@DIR@/venv/bin/python -m link.msp_sender
+ Restart=always
+ RestartSec=0.2
+ Nice=-15
++# BETAFLIGHT CHANGE: if the sender ever HANGS (not crashes), Betaflight would fly our last command for ever.
++# The sender says "still alive" every 20 ms; after 2 s of silence systemd kills and restarts it.
++WatchdogSec=2
++NotifyAccess=main
++# BETAFLIGHT CHANGE: its own core, so the vision program can never starve it
++CPUAffinity=0
+ 
+ [Install]
+ WantedBy=multi-user.target
+diff --git a/deploy/vision_hold.service b/deploy/vision_hold.service
+index 24a8070..d7457a0 100644
+--- a/deploy/vision_hold.service
++++ b/deploy/vision_hold.service
+@@ -42,6 +42,8 @@ ExecStart=@DIR@/venv/bin/python vision_hold.py --fc betaflight --camera 2 --no-g
+ Restart=always
+ RestartSec=1
+ Nice=-10
++# BETAFLIGHT CHANGE: the other three cores (core 0 belongs to msp_sender)
++CPUAffinity=1 2 3
+ 
+ [Install]
+ WantedBy=multi-user.target
+diff --git a/docs/BETAFLIGHT_CHANGES.md b/docs/BETAFLIGHT_CHANGES.md
+new file mode 100644
+index 0000000..2534753
+--- /dev/null
++++ b/docs/BETAFLIGHT_CHANGES.md
+@@ -0,0 +1,244 @@
++# Betaflight changes: what changed, why, and why it matters
++
++**Made 21 Nov 2026, on top of `main` at `753ffff`** (the Stage 2 Betaflight route and the first hardware-session fixes).
++Nothing was pushed: this is a local copy for the team to review and merge. Every change is marked `BETAFLIGHT CHANGE`
++in the code, has an on/off switch or a setting in `config.py`, and has a test.
++
++**All results below are SIMULATED or synthetic.** They prove the logic. The real aircraft must confirm the numbers.
++Section 4 lists the checks for the aircraft, with props off.
++
++---
++
++## 1. The short version
++
++| # | Problem found on `main` | What it would have cost | Fix |
++|---|---|---|---|
++| 1 | Stick values assumed a **straight line** from stick to lean. Betaflight's ANGLE mode sends the stick through the pilot's **rates curve**: our "8 degrees" came out as about **2 degrees** | Every flight hold fails (simulation: 0% at 10, 35 and 75 m) | `link/stick_curve.py`: Betaflight's own curve and its exact inverse |
++| 2 | **No I term and an 8 degree cap**: wind needs a steady lean, and 8 degrees only holds about 5 m/s | Blown off the spot in normal wind | I term that **starts at the pilot's own lean** at engage; 15 degree cap |
++| 3 | **Heading came from Betaflight**, which corrects it with **GPS course over ground** (no compass on board) | "GPS-aided state" during the hold (Stage 2 section 04): flight voided, GNSS-free bonus lost | Heading from the **camera**; Betaflight's heading is no longer used anywhere |
++| 4 | **AUX channels sent as 1500**. If the override mask were ever wrong, 1500 on the ARM channel could arm | A hidden safety trap | AUX sent as 1000 ("off"): a wrong mask can only show up loudly on the bench |
++| 5 | **No hysteresis** on the engage switch | A noisy switch reading could engage, disengage and re-home over and over | On at 1800, off below 1700 |
++| 6 | If the stick sender ever **hangs**, Betaflight flies our last command for ever | The one failure Betaflight cannot see | systemd watchdog: hung for 2 s, then killed and restarted |
++| 7 | **The holder's legs fool the tracker** (measured by the team on 21 Nov: legs, a table and bags in view cut agreement to 38%) | B1, B2, C fail on the bench | Top up corner-starved cells + frozen-point filter + "second-best motion" check + re-home when points are lost |
++| 8 | Bench height is a **guess** (1.0 m) | B1 fails if the judge holds it at 0.8 or 1.2 m | Height from motion (optional, OFF until a rehearsal confirms it) |
++| 9 | Height hold had **no I term** and a **raw, noisy** climb rate | Slow sink as the battery sags; throttle twitch | I term + climb rate smoothed over 0.5 s |
++| 10 | No protection against a **hot board** | The board shuts down at 95 C | Fewer frames above 80 C / 88 C; the sender is never slowed |
++| 11 | ORB re-find could lock **one tile off** on identical floor tiles | B2 / recovery bonus end in the wrong place | Lowe ratio test |
++
++---
++
++## 2. Every file that changed, and why
++
++### New files
++
++**`link/stick_curve.py`: how far Betaflight really leans for a stick value**
++- *What:* Betaflight's own rates formulas (Actual and Betaflight rates) and their exact inverse.
++- *Why:* the old code assumed full stick = `angle_limit`, in a straight line. Betaflight 4.5 and 2025.12 shape the
++  stick with the rates curve first. With Betaflight's default rates, an "8 degree" command produced 1.8 degrees
++  (`tests/test_stick_curve.py` prints the table).
++- *Proof:* it reproduces the centre sensitivities Betaflight documents (6.3 and 18 degrees), and the inverse is
++  exact to 0.001 degrees.
++- *Importance:* **critical.** Without it, the controller is about 4 times too weak near the centre and every hold
++  fails in simulation.
++- *To check:* the crew's CLI values (section 4); then `python -m link.stick_curve`.
++
++**`fusion/scale.py`: height above the floor from motion (bench)**
++- *What:* the accelerometer feels each sway in metres, the camera sees it in "heights". The ratio is the height.
++- *Why:* B1 is judged to 0.25 m over 0.5 to 1.5 m, and the judge holds the aircraft only "about 1 m" up. A 20%
++  height error is a 20% distance error.
++- *How:* both signals go through the SAME filters. Accelerometer axes are matched automatically, so its mounting
++  and signs do not matter. A bug was found and fixed while testing: the camera path first lacked the gravity
++  filter (0.50 m measured for a true 0.70 m); now it is within 4.5%.
++- *Importance:* medium. **OFF by default** (`VIO_HEIGHT = False`). The status line always prints its estimate
++  (`vio h=`). Turn it on only after a rehearsal shows it matches a tape-measured height.
++
++**`vision/frozen.py`: ignore what moves with the camera (bench)**
++- *What:* while the raw accelerometer says "we are being carried", a tracked point that stays still in the picture
++  for 0.4 s is attached to us (shoes, legs, hands, shadow, the drone's own legs) and is dropped.
++- *Why:* the team measured it on 21 Nov: legs in view made the tracker pick the wrong motion.
++- *Proof:* `tests/test_frozen.py`, through the real tracker, re-homes and health. A 1.2 m carry with legs in
++  36% / 61% of the picture: right 1/4 / 0/4 without, 4/4 / 4/4 with. Standing still: nothing dropped.
++- *Importance:* high for the bench (B1, B2, C are 30 points). Only active while **disarmed**.
++
++**`compute/thermal.py`: less work when the board is hot**
++- *What:* above 80 C process every 2nd frame; above 88 C every 3rd and no ORB searches.
++- *Why:* the board shuts down at 95 C. The prototype showed the hold still qualifies with vision at 10 frames a
++  second.
++- *Importance:* insurance. The stick sender is a separate program and never slows down.
++
++**Tests (new):** `test_stick_curve`, `test_bf_hold`, `test_bf_route`, `test_frozen`, `test_scale`,
++`test_thermal`. See section 3.
++
++### Changed files
++
++**`config.py`**
++- New settings, each explained where it is set: Betaflight rates (`BF_RATES_TYPE`, `BF_RC_RATE`, `BF_SRATE`,
++  `BF_EXPO`, `BF_DEADBAND_US`), `BF_KI_DEG_PER_M_S`, `BF_ENGAGE_OFF_PWM`, `BF_AUX_US`, `BF_ALT_KI_US_PER_M_S`,
++  `BF_CLIMB_SMOOTH_S`, `BF_HEADING_FROM_VISION`, `BF_RAW_IMU`, `BF_ACC_1G`, `BF_GYRO_YAW_SIGN`,
++  `CORNERS_PER_CELL`, `FROZEN_*`, `REHOME_INLIER_FRAC`, `VIO_HEIGHT`, `THERMAL_*`, `RECOVERY_RATIO`.
++- `BF_MAX_TILT_DEG` changed from 8 to 15. Holding against wind needs about atan(0.28 x wind / 9.81) of lean:
++  8 degrees holds about 5 m/s, 15 degrees about 9 m/s.
++
++**`fusion/position_controller.py`** (the controller)
++- Leans now go through `link/stick_curve.py`.
++- New `HoldController` (PD + I). The I term starts at the lean the pilot was holding at the engage moment. That
++  lean is exactly what holds the aircraft against the wind, so engaging is smooth and there is no wind offset.
++  The I term has anti-windup and is frozen while disarmed (a clean bench C response).
++- New `AltHold`: the height hold with a slow I term for battery sag.
++- `sticks()` and `throttle()` are kept, so nothing that used them breaks.
++
++**`link/msp_sender.py`** (the always-on stick sender)
++- The lean cap is judged in **degrees** through Betaflight's curve (`cap_stick`).
++- Engage hysteresis (on 1800, off 1700).
++- Also asks for `MSP_RAW_IMU` every other tick. These are raw accelerometer and gyro values; Betaflight never
++  corrects them with GPS. They are passed to the vision program.
++- Height hold uses `AltHold`; the climb rate is smoothed over 0.5 s.
++- Tells systemd "still alive" every tick (watchdog).
++- `--monitor` also prints |acc| (must be about 1.00 g at rest) and the raw gyro.
++
++**`link/msp.py`**
++- AUX1-4 sent as `BF_AUX_US` (1000) instead of 1500.
++- `MSP_RAW_IMU` (102) allowed, with `parse_raw_imu()`. GPS requests are still impossible to build.
++
++**`link/betaflight_link.py`**
++- Uses `HoldController`. At the engage edge in flight (armed), its I term is set from Betaflight's roll/pitch at
++  that moment. On the bench (disarmed) it starts at 0. Found in self-review: a judge's 3-4 degree hand tilt at
++  engage would otherwise offset the step 5 answer, and could make a 0.5 m move read as "centred". Test:
++  `test_bf_hold` Test 5.
++- Raw IMU lists are copied in one step before reading (they are filled by another thread; reading them while they
++  grow can crash Python with "deque mutated during iteration", the same reason the team used `LockedDeque`).
++- Betaflight's heading is **not** used (`BF_HEADING_FROM_VISION`). The yaw kept in the attitude history is our own
++  integrated raw gyro (once `BF_GYRO_YAW_SIGN` is checked), else 0.
++- Keeps the raw IMU samples: `moving()` ("are we being carried?") and `integ` (for `fusion/scale.py`).
++
++**`vision_hold.py`** (Betaflight route only; the ArduPilot route is unchanged)
++- **Heading from the camera:** the rotation measured against the home picture, chained across re-homes and the
++  origin return, exactly like the north/east offsets.
++- The yaw cross-check (`fusion/imu_check.py`) runs only with a yaw that is not Betaflight's (the raw gyro, after
++  `BF_GYRO_YAW_SIGN` is set).
++- Bench (disarmed): frozen-point filter and the tracker's "second-best motion" check, from the raw accelerometer.
++- Feeds the height-from-motion estimator every frame; prints `vio h=` on the status line; uses it only with
++  `VIO_HEIGHT = True`.
++- Heat: skips frames when hot.
++- Re-homes also when the agreeing points fall below 40% of the most seen on that reference, but **never during an
++  engaged hold**.
++
++**`vision/tracker.py`** (Saumya's file: small, switchable additions)
++- `CORNERS_PER_CELL`: after the usual search, any of the 4x4 cells that got less than a third of its share is
++  searched again on its own strength scale. The usual search takes the strongest corners of the whole picture
++  first. On a test scene, a strongly textured area took **all 144** corners and the plain floor got **none**; now
++  144 of 288 are on the floor. Cells that were fine are untouched. (A first version searched every cell this way
++  and the climb test's re-home drift doubled, 15 to 31 cm, from weak, noisy corners. The top-up version keeps
++  15 cm.)
++- `exclude`: points the frozen filter dropped are skipped before RANSAC.
++- `reject_static`: while carried, a "nothing moved" answer is checked against the second-best motion, and is never
++  kept as the prediction for the next frame.
++- With these off, the tracker behaves exactly as before.
++
++**`vision/rehome.py`** (Divyanshi's): an extra trigger, `inlier_drop` (bench / not holding).
++
++**`recovery/recovery.py`** (Divyanshi's): Lowe ratio test (`RECOVERY_RATIO = 0.8`, 0 = the old cross-check).
++
++**`deploy/msp_sender.service`**: `WatchdogSec=2`, `NotifyAccess=main`, `CPUAffinity=0` (its own core).
++**`deploy/vision_hold.service`**: `CPUAffinity=1 2 3`.
++
++**`tests/test_betaflight.py`**: four assertions updated to the new intended behaviour: AUX = 1000, the cap judged in
++degrees through the curve, and MSP_RAW_IMU in the list of commands sent. Everything else is unchanged.
++
++### Looked at and deliberately NOT changed
++- **A Kalman filter for velocity:** in the wind simulation it made the team's gains *worse* (75 m: 100% to 8%).
++  The team's 0.7/0.3 smoothing stays.
++- **Tracking on the image without the contrast boost:** the team measured that bare carpet needs CLAHE (93% vs 4
++  corners). Kept.
++- **Tilt correction from the gyro since engage** (better above 35 m): needs a clean high-rate gyro stream. The
++  APB's IIO gyro read about -0.2 rad/s at rest through sysfs, and Betaflight's raw gyro is whole degrees per
++  second. Do it after the APB gyro is confirmed in buffered mode. Betaflight's roll/pitch are used meanwhile;
++  their GPS correction acts only on heading, above 2 m/s.
++- **ArduPilot route:** unchanged.
++
++---
++
++## 3. Test results (this copy, 21 Nov)
++
++- **Team suite:** see the run log at the end of this file. New tests:
++  - `test_stick_curve`: matches Betaflight's documented centre sensitivity (6.4 vs 6.3, 18.0 vs 18).
++  - `test_bf_hold`: 30 s holds in 3 to 7 m/s wind with gusts, through the real controller, curve and sender cap.
++    - Results: 6/6 qualifying at 10, 35 and 75 m (worst 1.5, 1.3 and 2.8 m).
++    - The code before these changes: 0/4.
++    - Engage in steady wind: 0.30 m in the first 5 s.
++    - Bench step 5 with a 4 degree hand tilt at engage: roll 1407 for 0.5 m right (pushes left).
++    - Height with a noisy barometer and battery sag: within 0.82 m (limit 2 m).
++  - `test_bf_route`: the real `vision_hold.py --fc betaflight` with a pretend sender and video.
++    - Centred sticks before engage. Re-home at engage.
++    - 0.3 m to the right gives roll 1433 (pushes left) and pitch 1500.
++    - This holds although the drone turned 15 degrees and Betaflight's heading said 123 degrees.
++  - `test_frozen`: see above. `test_scale`: height within 4.5% for 0.7 to 1.3 m with scrambled accelerometer
++    axes; "don't know" when held still. `test_thermal`: 1 / 2 / 3 frames at 62 / 80.5 / 88.5 C.
++
++**75 m is the edge in simulation** (worst 2.8 m against the 3 m limit). Climb the ladder one level at a time and
++run `tools/hold_judge.py` on every blackbox.
++
++---
++
++## 4. Check on the aircraft before trusting this (props off, about 30 to 60 minutes)
++
++1. **Ask the crew** for the Betaflight CLI values (read only, no `save`): `angle_limit`, `rates_type`,
++   `roll_rc_rate`, `roll_srate`, `roll_expo` (and pitch), `deadband`, `msp_override_channels_mask` (must be 15).
++   Put them in `config.py` `BF_*`, then run `python -m link.stick_curve`.
++2. **ARM authority:** with override on and our sender running, the radio's ARM switch must still arm and disarm.
++3. **Dead-sender test:** `systemctl stop vision_hold` gives centred sticks within 0.3 s on the Receiver tab.
++   `kill -STOP` the sender: systemd restarts it within about 2 s.
++4. `python -m link.msp_sender --monitor`:
++   - |acc| about 1.00 g at rest (else fix `BF_ACC_1G`);
++   - turn the drone right: the sign of the 3rd gyro number goes into `BF_GYRO_YAW_SIGN`;
++   - lift the nose: pitch goes + (`BF_ATT_PITCH_SIGN`).
++5. **Bench step 5 rehearsal:** move 0.5 m left / right / forward / back. Roll and pitch must push against each move.
++6. **Legs rehearsal:** a teammate carries the drone 1 m up over the judging floor with legs in view. The status line
++   distance should match the tape measure; read `vio h=` against a tape-measured height before turning
++   `VIO_HEIGHT` on.
++7. **10 minutes at the bench:** status line FPS and temperature. The board should stay under 80 C.
++8. **First development flight at 10 m:** blackbox, then `tools/hold_judge.py`. Start with the gains as they are;
++   halve `BF_KP`/`BF_KD`/`BF_KI` if it oscillates.
++
++---
++
++## 5. Full test run on this copy (21 Nov 2026, Linux, Python 3.13)
++
++```
++PASS  test_altitude                  43.7 s  ALL ALTITUDE TESTS PASSED
++PASS  test_bench                     71.3 s  ALL BENCH TESTS PASSED (simulated floor: repeat on the real 
++PASS  test_betaflight                 1.2 s  ALL BETAFLIGHT TESTS PASSED (simulated flight controller: co
++PASS  test_bf_hold                    3.8 s  ALL BETAFLIGHT HOLD TESTS PASSED (simulation: confirm gains 
++PASS  test_bf_route                  10.2 s  ALL BETAFLIGHT ROUTE TESTS PASSED (pretend sender and camera
++PASS  test_budget                     0.1 s  ALL BUDGET TESTS PASSED
++PASS  test_calib_size                 0.5 s  ALL CALIBRATION SIZE TESTS PASSED
++PASS  test_ceiling                   27.1 s  ALL CEILING TESTS PASSED
++PASS  test_failsafe                   0.0 s  ALL FAILSAFE TESTS PASSED
++PASS  test_feature_filter             1.2 s  ALL FEATURE FILTER TESTS PASSED
++PASS  test_frozen                    11.6 s  ALL FROZEN-FILTER TESTS PASSED (window 0.4 s, still 1.0 px)
++PASS  test_gnss_monitor               7.8 s  ALL GNSS MONITOR TESTS PASSED
++PASS  test_handover                   0.0 s  ALL HANDOVER TESTS PASSED (16 tests)
++PASS  test_health                     1.3 s  ALL HEALTH TESTS PASSED
++PASS  test_heartbeat_filter           0.2 s  ALL HEARTBEAT FILTER TESTS PASSED
++PASS  test_hold_score                 0.9 s  ALL HOLD-SCORE TESTS PASSED
++PASS  test_level                      8.0 s  ALL LEVEL TESTS PASSED
++PASS  test_link_threads               4.2 s  ALL LINK THREAD TESTS PASSED
++PASS  test_params                     4.7 s  ALL PARAM TESTS PASSED
++PASS  test_preflight                  0.2 s  ALL PREFLIGHT TESTS PASSED
++PASS  test_process_scale              8.2 s  ALL PROCESS-SCALE TESTS PASSED
++PASS  test_reanchor                  30.5 s  ALL REANCHOR TESTS PASSED
++PASS  test_recovery                  22.4 s  ALL RECOVERY TESTS PASSED
++PASS  test_rehome                    31.4 s  ALL RE-HOME TESTS PASSED
++PASS  test_replay                    38.9 s  ALL REPLAY TESTS PASSED
++PASS  test_rolling_shutter           18.6 s  ALL ROLLING SHUTTER TESTS PASSED
++PASS  test_scale                      0.2 s  ALL SCALE TESTS PASSED
++PASS  test_stick_curve                0.2 s  ALL STICK CURVE TESTS PASSED
++PASS  test_thermal                    0.0 s  ALL THERMAL TESTS PASSED
++PASS  test_tilt                       6.2 s  ALL TILT TESTS PASSED
++PASS  test_tracker                    2.1 s  ALL TESTS PASSED
++PASS  test_trial_mode                11.0 s  ALL TRIAL-MODE TESTS PASSED
++PASS  test_truth_drift                0.1 s  ALL TRUTH-DRIFT TESTS PASSED
++33 of 33 test files passed in 368 s
++```
++
++To see every line that changed: `git diff` in this folder, or `docs/betaflight_changes.patch`.
+diff --git a/fusion/position_controller.py b/fusion/position_controller.py
+index 3be3cb5..d8ff375 100644
+--- a/fusion/position_controller.py
++++ b/fusion/position_controller.py
+@@ -4,58 +4,127 @@
+ # IN PLAIN WORDS
+ #   On ArduPilot we hand over a position and the autopilot does the flying. Betaflight
+ #   has no such thing: with the engage switch on it flies whatever stick values we send.
+-#   So this file is the pilot's thumbs. Two small rules:
++#   So this file is the pilot's thumbs. Three small rules:
+ #     sideways:  drifted to the right, or moving right  -> lean a little to the left
+-#                (same for forward/back). Never more than a few degrees.
+-#     height:    lower than where the pilot engaged, or sinking -> a little more throttle.
++#                (same for forward/back). Never more than BF_MAX_TILT_DEG.
++#     wind:      (BETAFLIGHT CHANGE) a steady push needs a steady lean. The "I" part slowly
++#                builds that lean, and it STARTS at the lean the pilot was holding when
++#                the switch went on, so the drone keeps fighting the wind from the very
++#                first moment instead of being blown off first.
++#     height:    lower than where the pilot engaged, or sinking -> a little more throttle;
++#                (BETAFLIGHT CHANGE) plus a slow "I" part for the battery getting weaker.
+ #   Heading is left alone (yaw stick centred): the camera measures in the drone's own
+ #   left/right/forward/back, so no compass is needed (the aircraft has none).
+ #
++#   BETAFLIGHT CHANGE (the big one): a lean in degrees is turned into a stick value with
++#   Betaflight's OWN curve (link/stick_curve.py), not a straight line. With Betaflight's
++#   default rates the straight line asked for ~4x too little lean near the centre.
++#   Wind simulation (30 s holds at 10/35/75 m, wind 3-7 m/s + gusts, 12 holds each):
++#     old (straight line, PD, 8 deg cap):            0% /  0% /  0% qualifying
++#     + Betaflight curve:                            25% / 50% / 33%
++#     + curve + I term + 15 deg cap (this file):    100% / 100% / 100%, worst 1.1 / 1.6 / 2.3 m
++#   (simulation, not flight: tune on the aircraft, start weaker rather than stronger)
++#
+ # HOW IT WORKS (technical)
+-#   Horizontal: PD on body-frame position error and velocity, output = lean angle,
+-#     angle = -(KP * error_m + KD * speed_mps), clipped to +-BF_MAX_TILT_DEG, then to stick
+-#     microseconds: 1500 + 500 * angle / BF_ANGLE_LIMIT_DEG (Betaflight ANGLE mode: full
+-#     stick = angle_limit degrees). A point mass leaning by a small angle a accelerates at
+-#     g * a, so KP = 6 deg/m is about 1 m/s^2 per metre and KD = 10 deg/(m/s) is roughly
+-#     critically damped (2 * sqrt(1) = 2 m/s^2 per m/s = 11.7 deg).
+-#   Vertical: PD on barometer height error and climb rate, added to the throttle the pilot
+-#     was holding at engage, clipped to +-BF_THROTTLE_AUTHORITY.
+-#   EVERY NUMBER IS A STARTING GUESS (config.py BF_*). No simulator exists for this route:
+-#   they must be tuned on the real aircraft, starting weaker rather than stronger. The
+-#   SIGNS are what the bench test checks (Stage 2 section 05 step 5: "roll and pitch oppose
+-#   the move"); BF_ROLL_SIGN / BF_PITCH_SIGN flip them if the bench shows the opposite.
+-#   Proof: tests/test_betaflight.py.
++#   Horizontal: PD + I in the home-heading frame (north = the nose direction when home was
++#     saved), lean = -(KP * error + KD * speed) + I, I += -KI * error * dt (only while not
++#     saturated: anti-windup; frozen while disarmed), clipped to +-BF_MAX_TILT_DEG, rotated
++#     into the drone's axes with the camera heading, then stick = us_from_angle(lean).
++#     KP = 6 deg/m ~ 1 m/s^2 per metre; KD = 10 deg/(m/s) ~ critically damped.
++#   Vertical: PD + I on barometer height error and smoothed climb rate, added to the throttle
++#     the pilot was holding at engage, clipped to +-BF_THROTTLE_AUTHORITY.
++#   The SIGNS are what the bench test checks (Stage 2 section 05 step 5: "roll and pitch
++#   oppose the move"); BF_ROLL_SIGN / BF_PITCH_SIGN flip them if the bench shows the opposite.
++#   Proof: tests/test_betaflight.py, tests/test_bf_hold.py (wind simulation).
+ #
+ # REFERENCES
+ #   - Stage 2 package section 03 ("your code is the position controller and the height
+ #     controller") and section 05 step 5.
+-#   - Astrom & Murray, "Feedback Systems", ch. 10-11 (PD control of a double integrator).
++#   - Astrom & Murray, "Feedback Systems", ch. 10-11 (PD/PID control of a double integrator,
++#     integrator anti-windup).
+ #   - Mahony, Kumar, Corke, "Multirotor Aerial Vehicles: Modeling, Estimation, and Control
+ #     of Quadrotor", IEEE RAM 2012 (small-angle lean -> horizontal acceleration).
+ # =====================================================================================
+ import math
+ 
+ import config
++from link import stick_curve
+ 
+ 
+ def _clip(x, lim):
+     return max(-lim, min(lim, x))
+ 
+ 
++def _stick(lean_deg, sign):
++    """Lean in degrees (+ = right / forward) -> stick microseconds through Betaflight's own curve."""
++    return round(stick_curve.us_from_angle(sign * lean_deg))
++
++
+ def sticks(forward_m, right_m, v_forward, v_right):
+-    """Position error and speed in the drone's own axes (metres, m/s; + = forward / right of home)
+-    -> (roll_us, pitch_us). Stick convention: roll > 1500 leans right, pitch > 1500 leans forward."""
++    """PD only (no memory). Position error and speed in the drone's own axes (metres, m/s; + = forward /
++    right of home) -> (roll_us, pitch_us). Stick convention: roll > 1500 leans right, pitch > 1500 leans
++    forward. Kept for the bench and the tests; the flight uses HoldController below."""
+     if not all(map(math.isfinite, (forward_m, right_m, v_forward, v_right))):   # REVIEW M3
+         return 1500, 1500
+     lean_right = _clip(-(config.BF_KP_DEG_PER_M * right_m + config.BF_KD_DEG_PER_MPS * v_right), config.BF_MAX_TILT_DEG)
+     lean_fwd = _clip(-(config.BF_KP_DEG_PER_M * forward_m + config.BF_KD_DEG_PER_MPS * v_forward), config.BF_MAX_TILT_DEG)
+-    per_deg = 500.0 / config.BF_ANGLE_LIMIT_DEG
+-    return (round(1500 + config.BF_ROLL_SIGN * lean_right * per_deg),
+-            round(1500 + config.BF_PITCH_SIGN * lean_fwd * per_deg))
++    return _stick(lean_right, config.BF_ROLL_SIGN), _stick(lean_fwd, config.BF_PITCH_SIGN)
++
++
++class HoldController:
++    """BETAFLIGHT CHANGE: PD + I, in the home-heading frame (north/east as vision_hold.py measures them)."""
++
++    def __init__(self):
++        self.i = [0.0, 0.0]            # degrees of lean held by the I term (north, east)
++        self.t = None
++
++    def engage(self, lean_fwd_deg=0.0, lean_right_deg=0.0, heading_rad=0.0):
++        """The switch just went on. Start the I term at the lean the pilot was holding (from Betaflight's
++        attitude: forward = nose down), turned into the home-heading frame."""
++        c, s = math.cos(heading_rad), math.sin(heading_rad)
++        self.i = [lean_fwd_deg * c - lean_right_deg * s, lean_fwd_deg * s + lean_right_deg * c]
++        self.i = [_clip(v, config.BF_MAX_TILT_DEG) for v in self.i]
++        self.t = None
+ 
++    def update(self, t, north, east, v_north, v_east, heading_rad, integrate=True):
++        """-> (roll_us, pitch_us). heading_rad = the drone's heading in the same frame as north/east."""
++        if not all(map(math.isfinite, (north, east, v_north, v_east, heading_rad))):
++            return 1500, 1500
++        dt = 0.0 if self.t is None else max(0.0, min(0.2, t - self.t))
++        self.t = t
++        lean = []
++        for k, (p, v) in enumerate(((north, v_north), (east, v_east))):
++            raw = -(config.BF_KP_DEG_PER_M * p + config.BF_KD_DEG_PER_MPS * v) + self.i[k]
++            if integrate and abs(raw) < config.BF_MAX_TILT_DEG:            # anti-windup
++                self.i[k] = _clip(self.i[k] - config.BF_KI_DEG_PER_M_S * p * dt, config.BF_MAX_TILT_DEG)
++            lean.append(_clip(raw, config.BF_MAX_TILT_DEG))
++        c, s = math.cos(heading_rad), math.sin(heading_rad)
++        lean_fwd = lean[0] * c + lean[1] * s                               # home frame -> the drone's axes
++        lean_right = -lean[0] * s + lean[1] * c
++        m = config.BF_MAX_TILT_DEG
++        return _stick(_clip(lean_right, m), config.BF_ROLL_SIGN), _stick(_clip(lean_fwd, m), config.BF_PITCH_SIGN)
+ 
+-def throttle(hold_us, height_error_m, climb_mps):
++
++def throttle(hold_us, height_error_m, climb_mps, integral_us=0.0):
+     """hold_us = the pilot's throttle at engage. height_error_m = engage height - height now
+-    (+ = we are too low). -> throttle in microseconds."""
+-    extra = config.BF_ALT_KP_US_PER_M * height_error_m - config.BF_ALT_KD_US_PER_MPS * climb_mps
++    (+ = we are too low). integral_us = AltHold's slow part. -> throttle in microseconds."""
++    extra = config.BF_ALT_KP_US_PER_M * height_error_m - config.BF_ALT_KD_US_PER_MPS * climb_mps + integral_us
+     return round(hold_us + _clip(extra, config.BF_THROTTLE_AUTHORITY))
++
++
++class AltHold:
++    """BETAFLIGHT CHANGE: the height hold with a slow I term (battery sag) and anti-windup."""
++
++    def __init__(self):
++        self.i, self.t = 0.0, None
++
++    def reset(self):
++        self.i, self.t = 0.0, None
++
++    def update(self, t, hold_us, height_error_m, climb_mps):
++        dt = 0.0 if self.t is None else max(0.0, min(0.2, t - self.t))
++        self.t = t
++        raw = config.BF_ALT_KP_US_PER_M * height_error_m - config.BF_ALT_KD_US_PER_MPS * climb_mps + self.i
++        if abs(raw) < config.BF_THROTTLE_AUTHORITY:                        # anti-windup
++            self.i = _clip(self.i + config.BF_ALT_KI_US_PER_M_S * height_error_m * dt, config.BF_THROTTLE_AUTHORITY)
++        return throttle(hold_us, height_error_m, climb_mps, self.i)
+diff --git a/fusion/scale.py b/fusion/scale.py
+new file mode 100644
+index 0000000..6906d11
+--- /dev/null
++++ b/fusion/scale.py
+@@ -0,0 +1,175 @@
++# =====================================================================================
++# fusion/scale.py  -  height above the floor from motion (bench, no rangefinder)   BETAFLIGHT CHANGE
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   Turning pixels into metres needs the height above the floor. On the bench the judge
++#   holds the aircraft "about 1 m" up (Stage 2 section 05) and we cannot measure exactly
++#   how high: the barometer only knows CHANGES (and is noisy: +-0.3-0.6 m measured).
++#   But while the judge carries the aircraft it sways a little with every step. The
++#   accelerometer feels that sway in real metres; the camera sees the same sway as a
++#   fraction of the height (5 cm at 1 m looks like 5% of the height; at 2 m like 2.5%).
++#   Compare the two and you get the height. This is the "inertial" half of visual-inertial
++#   odometry, and it is what turns the bench guess (1.0 m) into a measurement.
++#   OFF by default (config.VIO_HEIGHT): the status line prints its estimate ("vio h=") so
++#   the team can check it against a tape measure in a rehearsal before trusting it.
++#
++# HOW IT WORKS (technical)
++#   ImuIntegrator: raw accelerometer (Betaflight MSP_RAW_IMU, m/s^2, sensor axes) minus a slow
++#     gravity estimate (low-pass, tau 1.5 s), integrated twice with a slow leak -> "IMU
++#     position" (drifts; only its wiggles are used).
++#   ScaleEstimator: the SAME band-pass filter (3 x high-pass 0.35 Hz + low-pass 4 Hz) on the
++#     IMU position and on the vision position in "heights" (metres / assumed height), so
++#     bias, drift and gravity leak cancel and both have the same delay. Then least squares
++#     over the last ~8 s: imu = h * vision. The axes are matched automatically: the pairing
++#     (and sign) of IMU and camera axes with the strongest agreement is used, so the
++#     sensor's mounting and sign conventions do not matter. A sigma comes from the fit.
++#   Simulation (prototype, 300 carries, height 0.6-1.4 m, 1 deg tilt-error bias, 3 deg axis
++#   misalignment, 10% focal error): B1 within 0.25 m in 100% vs 64% with the 1.0 m guess.
++#   Real hardware: NOT checked. Proof of the maths: tests/test_scale.py.
++#
++# REFERENCES
++#   - Kelly & Sukhatme, "Visual-Inertial Sensor Fusion: Localization, Mapping and Sensor-to-
++#     Sensor Self-calibration", IJRR 2011 (metric scale is observable from accelerations).
++#   - Nutzi, Weiss, Scaramuzza, Siegwart, "Fusion of IMU and Vision for Absolute Scale
++#     Estimation in Monocular SLAM", J. Intell. Robot. Syst. 2011.
++# =====================================================================================
++import itertools
++import math
++from collections import deque
++
++
++class BandPass:
++    """3 x first-order high-pass + 1 x low-pass. Identical instances on both signals = identical delay."""
++
++    def __init__(self, f_hp=0.35, f_lp=4.0):
++        self.f_hp, self.f_lp = f_hp, f_lp
++        self.prev = None
++        self.y = [0.0, 0.0, 0.0]
++        self.lp = 0.0
++
++    def __call__(self, x, dt):
++        if self.prev is None:
++            self.prev = [x, 0.0, 0.0]
++            return 0.0
++        a = 1.0 / (1.0 + 2 * math.pi * self.f_hp * dt)
++        v = x
++        for i in range(3):
++            y = a * (self.y[i] + v - self.prev[i])
++            self.prev[i], self.y[i] = v, y
++            v = y
++        b = dt / (dt + 1.0 / (2 * math.pi * self.f_lp))
++        self.lp += b * (v - self.lp)
++        return self.lp
++
++
++class HighPass:
++    """First-order high-pass with time constant tau (the same maths as 'x minus its slow average')."""
++
++    def __init__(self, tau):
++        self.tau, self.lp = tau, None
++
++    def __call__(self, x, dt):
++        if self.lp is None:
++            self.lp = x
++        self.lp += min(1.0, dt / self.tau) * (x - self.lp)
++        return x - self.lp
++
++
++class ImuIntegrator:
++    """Raw accelerometer -> gravity removed -> velocity -> position (leaky, sensor axes). History kept."""
++
++    def __init__(self, tau_gravity=1.5, tau_leak=20.0):
++        self.g = None
++        self.v = [0.0, 0.0, 0.0]
++        self.p = [0.0, 0.0, 0.0]
++        self.t = None
++        self.tau_g, self.tau_leak = tau_gravity, tau_leak
++        self.hist = deque(maxlen=400)
++
++    def add(self, t, acc):
++        if self.t is None:
++            self.t, self.g = t, list(acc)
++            self.hist.append((t, tuple(self.p)))
++            return
++        dt = max(1e-3, min(0.2, t - self.t))
++        self.t = t
++        kg, leak = dt / self.tau_g, math.exp(-dt / self.tau_leak)
++        for i in range(3):
++            self.g[i] += kg * (acc[i] - self.g[i])
++            a = acc[i] - self.g[i]
++            self.v[i] = leak * self.v[i] + a * dt
++            self.p[i] = leak * self.p[i] + self.v[i] * dt
++        self.hist.append((t, tuple(self.p)))
++
++    def at(self, t):
++        """IMU position closest in time to t, or None."""
++        hist = list(self.hist)                            # one atomic copy: the link thread keeps appending
++        if not hist:
++            return None
++        s = min(hist, key=lambda h: abs(h[0] - t))
++        return s[1] if abs(s[0] - t) < 0.1 else None
++
++
++class ScaleEstimator:
++    def __init__(self, tau_s=8.0, min_motion_m=0.006, mirror=(1.5,)):
++        """mirror: the IMU path removes gravity with a slow average (tau 1.5 s, ImuIntegrator). The vision path
++        gets the SAME high-pass first, or the slow part of a long carry would not match (measured: 0.50 vs 0.70).
++        (The 20 s leak is slow enough to ignore after the band-pass.)"""
++        self.tau, self.min_motion = tau_s, min_motion_m
++        self.mirror = [[HighPass(m) for m in mirror] for _ in range(3)]
++        self.bp_i = [BandPass() for _ in range(3)]
++        self.bp_v = [BandPass() for _ in range(3)]
++        self.C = [[0.0] * 3 for _ in range(3)]            # sum imu_i * vis_j
++        self.I2 = [0.0] * 3
++        self.V2 = [0.0] * 3
++        self.n = 0.0
++        self.t = None
++
++    def update(self, t, imu_pos, vis_norm):
++        """imu_pos: 3 numbers (metres, any sensor axes, drifting is fine). vis_norm: (north/h, east/h, ln h)
++        from vision with the ASSUMED height h. Call once per frame."""
++        if imu_pos is None or vis_norm is None or not all(map(math.isfinite, vis_norm)):
++            return
++        dt = 1 / 15 if self.t is None else max(1e-3, t - self.t)
++        self.t = t
++        lam = math.exp(-dt / self.tau)
++        a = [self.bp_i[k](imu_pos[k], dt) for k in range(3)]
++        v = []
++        for k in range(3):
++            x = vis_norm[k]
++            for f in self.mirror[k]:
++                x = f(x, dt)
++            v.append(self.bp_v[k](x, dt))
++        for i in range(3):
++            self.I2[i] = lam * self.I2[i] + a[i] * a[i]
++            self.V2[i] = lam * self.V2[i] + v[i] * v[i]
++            for j in range(3):
++                self.C[i][j] = lam * self.C[i][j] + a[i] * v[j]
++        self.n = lam * self.n + 1
++
++    def estimate(self):
++        """-> (height_m, sigma_m) or (None, inf) when the aircraft has not moved enough to tell."""
++        if self.n < 30 or sum(self.V2) <= 0:
++            return None, math.inf
++        best = None
++        for perm in itertools.permutations(range(3)):     # which IMU axis goes with which vision axis
++            num = sum(abs(self.C[perm[j]][j]) for j in range(3))
++            if best is None or num > best[0]:
++                best = (num, perm)
++        num, perm = best
++        den = sum(self.V2)
++        h = num / den
++        imu_rms = math.sqrt(sum(self.I2[perm[j]] for j in range(3)) / self.n)
++        if h <= 0.05 or imu_rms < self.min_motion:
++            return None, math.inf
++        res = max(sum(self.I2[perm[j]] for j in range(3)) - h * num, 1e-12) / self.n
++        sigma = math.sqrt(res / den * self.n / 15.0)       # ~15 independent samples per window
++        return h, max(sigma, 0.03 * h)
++
++
++def fuse(prior_h, prior_sigma, vio_h, vio_sigma):
++    """Inverse-variance blend of the bench guess and the motion estimate."""
++    if vio_h is None or not math.isfinite(vio_sigma):
++        return prior_h
++    w1, w2 = 1 / prior_sigma ** 2, 1 / vio_sigma ** 2
++    return (prior_h * w1 + vio_h * w2) / (w1 + w2)
+diff --git a/link/betaflight_link.py b/link/betaflight_link.py
+index 74424f2..46e6d14 100644
+--- a/link/betaflight_link.py
++++ b/link/betaflight_link.py
+@@ -28,6 +28,16 @@
+ #   No GNSS anywhere on this route: nothing here or in the sender can request it.
+ #   Proof: tests/test_betaflight.py.
+ #
++# BETAFLIGHT CHANGES (21 Nov, after Stage 2 + the first hardware session)
++#   - The controller is fusion/position_controller.HoldController (PD + I, Betaflight's own
++#     stick curve). Its I term starts at the lean the pilot holds at the engage moment.
++#   - HEADING: Betaflight corrects its heading with GPS course over ground (no compass), so we
++#     do not use it (config.BF_HEADING_FROM_VISION). The yaw in self.attitudes is our own:
++#     Betaflight's RAW gyro integrated (only if config.BF_GYRO_YAW_SIGN was checked on the
++#     bench; else 0). vision_hold.py takes the heading from the camera.
++#   - Raw accelerometer/gyro samples are kept (self.imu) for moving() ("are we being carried?",
++#     vision/frozen.py) and imu_positions() (optional height from motion, fusion/scale.py).
++#
+ # REFERENCES: Stage 2 package Rev 2.0 sections 03-05; handover.py (Part D).
+ # =====================================================================================
+ import json
+@@ -39,6 +49,7 @@ from collections import deque
+ 
+ import config
+ from fusion import position_controller
++from fusion.scale import ImuIntegrator
+ from link.drone_link import DroneLink
+ 
+ NEUTRAL = (1500, 1500)
+@@ -69,22 +80,71 @@ class BetaflightLink(DroneLink):
+         self._last_reset = None
+         self.last_sticks = NEUTRAL                         # for tests and the log
+         self._tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++        # BETAFLIGHT CHANGES
++        self.hold = position_controller.HoldController()
++        self.armed = False
++        self.imu = deque(maxlen=200)                       # (t, acc in g [3], gyro in deg/s [3]) ~8 s at 25 Hz
++        self.integ = ImuIntegrator()                       # double-integrated raw accel, for fusion/scale.py
++        self.gyro_yaw = 0.0                                # integrated raw gyro yaw (rad), our own heading source
++        self._gyro_bias = 0.0
++        self._last_imu_t = None
++        self._last_att = None
+ 
+     # ----- telemetry from the sender -----
+     def on_telemetry(self, tele):
+         """One telemetry packet from link/msp_sender.py."""
+         self.mode_time = time.monotonic()
++        imu = tele.get("imu")
++        if imu and imu[0] != self._last_imu_t:             # BETAFLIGHT CHANGE: raw sensors (never GPS-corrected)
++            self._on_imu(*imu)
+         if tele.get("att"):
+-            self.attitudes.append(tuple(tele["att"]))
++            t_att, roll, pitch, bf_yaw = tele["att"]
++            self._last_att = (roll, pitch)
++            if config.BF_HEADING_FROM_VISION:              # never Betaflight's GPS-corrected heading
++                bf_yaw = self.gyro_yaw if config.BF_GYRO_YAW_SIGN else 0.0
++            self.attitudes.append((t_att, roll, pitch, bf_yaw))
+         if tele.get("alt") is not None:
+             self.local_z = (tele["t"], -tele["alt"])       # DroneLink.height() reads this (down = +)
+         self.rc = {i + 1: v for i, v in enumerate(tele.get("rc") or [])}
+         engaged = bool(tele.get("engaged"))
++        arm = self.rc.get(config.BF_ARM_CHANNEL)
++        self.armed = arm is not None and arm >= 1500
+         if engaged and not self.engaged:
+             self._wait_reset = self._last_reset            # centred sticks until the new home is saved
++            # BETAFLIGHT CHANGE: in flight the I term starts at the lean the pilot holds against the wind. On the
++            # bench (disarmed) it starts at 0: a judge's hand tilt must not offset the step 5 response.
++            roll, pitch = (self._last_att or (0.0, 0.0)) if self.armed else (0.0, 0.0)
++            self.hold.engage(lean_fwd_deg=-math.degrees(pitch), lean_right_deg=math.degrees(roll), heading_rad=0.0)
+         self.engaged = engaged
+         self.conn.flightmode = "POSHOLD" if engaged else "MANUAL"
+ 
++    def _on_imu(self, t, acc, gyro):
++        """BETAFLIGHT CHANGE: one raw accelerometer (g) + gyro (deg/s) sample from Betaflight."""
++        dt = 0.0 if self._last_imu_t is None else max(0.0, min(0.2, t - self._last_imu_t))
++        self._last_imu_t = t
++        self.imu.append((t, list(acc), list(gyro)))
++        z = gyro[2] if len(gyro) > 2 else 0.0
++        if not self.armed and not self.moving(t):          # at rest on the bench: learn the gyro offset
++            self._gyro_bias += 0.05 * (z - self._gyro_bias)
++        self.gyro_yaw += math.radians(config.BF_GYRO_YAW_SIGN * (z - self._gyro_bias)) * dt
++        self.integ.add(t, [a * 9.80665 for a in acc])
++
++    def moving(self, t=None, window=None):
++        """BETAFLIGHT CHANGE: True if the raw accelerometer wobbled more than FROZEN_MOVING_ACC (m/s^2 RMS of
++        the change in |acc|) or the gyro turned faster than 8 deg/s within the last `window` seconds."""
++        window = config.FROZEN_WINDOW_S if window is None else window
++        if not self.imu:
++            return False
++        t = self.imu[-1][0] if t is None else t
++        recent = [s for s in list(self.imu) if t - window <= s[0] <= t + 0.05]   # list(): one atomic copy (threads)
++        if len(recent) < 4:
++            return False
++        mags = [9.80665 * math.sqrt(sum(a * a for a in s[1])) for s in recent]
++        mean = sum(mags) / len(mags)
++        rms = math.sqrt(sum((m - mean) ** 2 for m in mags) / len(mags))
++        spin = max(math.sqrt(sum(g * g for g in s[2])) for s in recent)
++        return rms >= config.FROZEN_MOVING_ACC or spin >= 8.0
++
+     def _reader(self):
+         rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+         rx.bind(("127.0.0.1", config.BF_TELEMETRY_PORT))
+@@ -127,10 +187,12 @@ class BetaflightLink(DroneLink):
+         if quality <= 0 or self._wait_reset is not None or not self.engaged:
+             self.last_sticks = NEUTRAL
+         else:
++            # BETAFLIGHT CHANGE: PD + I in the home-heading frame, Betaflight's own stick curve. att[2] is the
++            # heading vision_hold.py made north/east with (the camera's, by default), so it cancels exactly.
+             yaw = att[2]
+-            forward = north * math.cos(yaw) + east * math.sin(yaw)
+-            right = -north * math.sin(yaw) + east * math.cos(yaw)
+-            self.last_sticks = position_controller.sticks(forward, right, float(vel_body[0]), float(vel_body[1]))
++            vf, vr = float(vel_body[0]), float(vel_body[1])
++            v_n, v_e = vf * math.cos(yaw) - vr * math.sin(yaw), vf * math.sin(yaw) + vr * math.cos(yaw)
++            self.last_sticks = self.hold.update(t_capture, north, east, v_n, v_e, yaw, integrate=self.armed)
+         try:
+             self._tx.sendto(json.dumps(dict(roll=self.last_sticks[0], pitch=self.last_sticks[1])).encode(),
+                             ("127.0.0.1", config.BF_SENDER_PORT))
+diff --git a/link/msp.py b/link/msp.py
+index 08f7b70..7a45311 100644
+--- a/link/msp.py
++++ b/link/msp.py
+@@ -17,6 +17,9 @@
+ #                          The FC uses the first four while the engage switch (CH10) is on.
+ #     108 MSP_ATTITUDE     int16 roll (0.1 deg), int16 pitch (0.1 deg), int16 heading (deg)
+ #     105 MSP_RC           uint16 per channel: what the receiver sees (CH10 = engage switch)
++#     102 MSP_RAW_IMU      BETAFLIGHT CHANGE: 9 x int16: accelerometer (raw units, ~2048 = 1 g), gyro (deg/s),
++#                          magnetometer (none fitted). Plain sensor readings: Betaflight never mixes GPS into
++#                          them (unlike its heading, which it corrects with GPS course over ground).
+ #   GNSS RULE (Stage 2 section 04): MSP_RAW_GPS (106) and friends must never be requested.
+ #   request() refuses any command that is not in ALLOWED, so no caller can do it by mistake.
+ #   Proof: tests/test_betaflight.py.
+@@ -30,8 +33,8 @@
+ # =====================================================================================
+ import struct
+ 
+-MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC = 105, 108, 200
+-ALLOWED = frozenset({MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC})     # anything else (GPS!) is refused
++MSP_RAW_IMU, MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC = 102, 105, 108, 200
++ALLOWED = frozenset({MSP_RAW_IMU, MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC})   # anything else (GPS!) is refused
+ 
+ 
+ def frame(command, payload=b""):
+@@ -50,10 +53,13 @@ def request(command):
+     return frame(command)
+ 
+ 
+-def set_raw_rc(roll, pitch, throttle, yaw):
+-    """The stick message. Values in microseconds (1500 = stick centred). AUX1-4 are sent as 1500:
+-    the flight controller ignores them (Stage 2 section 03)."""
+-    return frame(MSP_SET_RAW_RC, struct.pack("<8H", int(roll), int(pitch), int(throttle), int(yaw), 1500, 1500, 1500, 1500))
++def set_raw_rc(roll, pitch, throttle, yaw, aux=None):
++    """The stick message. Values in microseconds (1500 = stick centred). AUX1-4: the flight controller ignores
++    them (Stage 2 section 03). BETAFLIGHT CHANGE: sent as config.BF_AUX_US (1000, "off"), not 1500, so a wrong
++    override mask could never arm the aircraft (see config.py)."""
++    import config
++    a = int(config.BF_AUX_US if aux is None else aux)
++    return frame(MSP_SET_RAW_RC, struct.pack("<8H", int(roll), int(pitch), int(throttle), int(yaw), a, a, a, a))
+ 
+ 
+ class Parser:
+@@ -90,6 +96,12 @@ def parse_attitude(payload):
+     return roll / 10.0, pitch / 10.0, float(heading)
+ 
+ 
++def parse_raw_imu(payload):
++    """BETAFLIGHT CHANGE -> (acc_x, acc_y, acc_z) in Betaflight's raw units, (gyro_x, gyro_y, gyro_z) in deg/s."""
++    v = struct.unpack("<9h", payload[:18])
++    return v[0:3], v[3:6]
++
++
+ def parse_rc(payload):
+     """-> list of channel values in microseconds."""
+     n = len(payload) // 2
+diff --git a/link/msp_sender.py b/link/msp_sender.py
+index b990be8..f65d8db 100644
+--- a/link/msp_sender.py
++++ b/link/msp_sender.py
+@@ -19,6 +19,17 @@
+ #   It also reads the drone's tilt and the radio channels and passes them to the vision
+ #   program. It never asks for GPS (link/msp.py cannot build that request).
+ #
++#   BETAFLIGHT CHANGES (21 Nov, after Stage 2 + the first hardware session):
++#     - the lean cap is applied in DEGREES through Betaflight's own stick curve
++#       (link/stick_curve.py), not as a straight line of microseconds;
++#     - the engage switch has hysteresis (on at 1800, off below 1700);
++#     - it also asks for the RAW accelerometer and gyro (MSP_RAW_IMU, plain sensor values,
++#       never GPS-corrected) and passes them on ("are we being carried?", yaw cross-check);
++#     - height hold gets a slow I term and a smoothed climb rate (fusion/position_controller.AltHold);
++#     - it tells systemd "still alive" every tick; if it ever hangs, systemd restarts it
++#       (deploy/msp_sender.service WatchdogSec). A hang is the one failure Betaflight
++#       cannot see: it would hold our last command for ever.
++#
+ # HOW IT WORKS (technical)
+ #   Serial /dev/ttymxc2 at 115200, MSP v1 (link/msp.py). Every 20 ms: read replies, decide
+ #   the four channels, write MSP_SET_RAW_RC, ask for MSP_ATTITUDE (every tick) and MSP_RC
+@@ -50,7 +61,7 @@ import time
+ 
+ import config
+ from fusion import position_controller
+-from link import msp
++from link import msp, stick_curve
+ 
+ 
+ class Sender:
+@@ -66,6 +77,8 @@ class Sender:
+         self.climb = 0.0
+         self.tick = 0
+         self.last = (1500, 1500, config.BF_HOVER_THROTTLE, 1500)
++        self.imu = None                              # BETAFLIGHT CHANGE: (t, acc in g, gyro in deg/s), raw sensors
++        self.alt_hold = position_controller.AltHold()
+ 
+     def set_target(self, roll_us, pitch_us, now):
+         """The vision program's request. Only used while fresh and while the pilot has engaged.
+@@ -88,6 +101,9 @@ class Sender:
+                             math.radians(config.BF_ATT_PITCH_SIGN * pitch), self.yaw)
+             elif command == msp.MSP_RC:
+                 self.rc = msp.parse_rc(payload)
++            elif command == msp.MSP_RAW_IMU and len(payload) >= 18:   # BETAFLIGHT CHANGE
++                acc, gyro = msp.parse_raw_imu(payload)
++                self.imu = (now, [a / config.BF_ACC_1G for a in acc], list(gyro))
+ 
+     def _height(self, now, armed):
+         if self.baro is None:
+@@ -102,7 +118,8 @@ class Sender:
+         else:
+             new = self.alt + 0.2 * (h - self.alt)
+             dt = max(now - self.alt_t, 1e-3)
+-            self.climb += 0.2 * ((new - self.alt) / dt - self.climb)
++            k = min(1.0, dt / max(config.BF_CLIMB_SMOOTH_S, dt))     # BETAFLIGHT CHANGE: smoothed over ~0.5 s
++            self.climb += k * ((new - self.alt) / dt - self.climb)
+             self.alt = new
+         self.alt_t = now
+ 
+@@ -112,7 +129,9 @@ class Sender:
+         (`now`) jumps on the APB when network time arrives; a backward jump would revive a dead request."""
+         fresh_now = now if fresh_now is None else fresh_now
+         rc = self.rc
+-        engaged = len(rc) >= config.BF_ENGAGE_CHANNEL and rc[config.BF_ENGAGE_CHANNEL - 1] >= config.BF_ENGAGE_PWM
++        sw = rc[config.BF_ENGAGE_CHANNEL - 1] if len(rc) >= config.BF_ENGAGE_CHANNEL else 0
++        # BETAFLIGHT CHANGE: hysteresis. On at BF_ENGAGE_PWM (1800, the judges' threshold), off below BF_ENGAGE_OFF_PWM
++        engaged = sw >= config.BF_ENGAGE_PWM or (self.engaged and sw > config.BF_ENGAGE_OFF_PWM)
+         armed = len(rc) >= config.BF_ARM_CHANNEL and rc[config.BF_ARM_CHANNEL - 1] >= 1500
+         self._height(now, armed)
+         if len(rc) > config.BF_RC_THROTTLE_INDEX:
+@@ -123,17 +142,16 @@ class Sender:
+                 self.hold_throttle = pilot
+         if engaged and not self.engaged:
+             self.alt_engage = self.alt               # keep THIS height
++            self.alt_hold.reset()
+         self.engaged = engaged
+         hold = self.hold_throttle if self.hold_throttle is not None else config.BF_HOVER_THROTTLE
+ 
+         roll = pitch = 1500.0
+         if engaged and 0.0 <= fresh_now - self.target_t <= config.BF_TARGET_TIMEOUT_S:
+-            most = 500.0 * config.BF_MAX_TILT_DEG / config.BF_ANGLE_LIMIT_DEG    # second cap, whatever was asked
+-            roll = 1500 + max(-most, min(most, self.target[0] - 1500))
+-            pitch = 1500 + max(-most, min(most, self.target[1] - 1500))
++            roll, pitch = cap_stick(self.target[0]), cap_stick(self.target[1])   # second cap, whatever was asked
+         throttle = hold
+         if engaged and config.BF_HEIGHT_HOLD and self.alt is not None and self.alt_engage is not None:
+-            throttle = position_controller.throttle(hold, self.alt_engage - self.alt, self.climb)
++            throttle = self.alt_hold.update(now, hold, self.alt_engage - self.alt, self.climb)
+         throttle = max(config.BF_THROTTLE_MIN, min(config.BF_THROTTLE_MAX, throttle))
+         return round(roll), round(pitch), round(throttle), 1500
+ 
+@@ -146,16 +164,44 @@ class Sender:
+             print(f"msp_sender: decision error ({e!r}) - sending centred sticks", flush=True)
+             out = (1500, 1500, self.last[2], 1500)
+         self.last = out
++        every = max(1, config.BF_RAW_IMU_EVERY)
++        raw_imu = config.BF_RAW_IMU and self.tick % every == 1 % every     # BETAFLIGHT CHANGE (the RC ticks stay even)
+         self.port.write(msp.set_raw_rc(*out) + msp.request(msp.MSP_ATTITUDE)
+-                        + (msp.request(msp.MSP_RC) if self.tick % 2 == 0 else b""))
++                        + (msp.request(msp.MSP_RC) if self.tick % 2 == 0 else b"")
++                        + (msp.request(msp.MSP_RAW_IMU) if raw_imu else b""))
+         self.tick += 1
+-        return dict(t=now, att=self.att, alt=self.alt, rc=self.rc, engaged=self.engaged, sent=out)
++        return dict(t=now, att=self.att, alt=self.alt, rc=self.rc, engaged=self.engaged, sent=out, imu=self.imu)
+ 
+     def neutral(self):
+         """Centred sticks at the last throttle (used on a clean stop)."""
+         self.port.write(msp.set_raw_rc(1500, 1500, self.last[2], 1500))
+ 
+ 
++def cap_stick(us):
++    """BETAFLIGHT CHANGE: a stick value -> the same direction, but never more lean than BF_MAX_TILT_DEG.
++    Judged in DEGREES through Betaflight's own curve (link/stick_curve.py); NaN -> centre."""
++    if not math.isfinite(us):
++        return 1500.0
++    deg = stick_curve.angle_from_us(us)
++    if abs(deg) <= config.BF_MAX_TILT_DEG:
++        return float(us)
++    return stick_curve.us_from_angle(math.copysign(config.BF_MAX_TILT_DEG, deg))
++
++
++def _notify(sock_cache=[]):
++    """BETAFLIGHT CHANGE: tell systemd 'still alive' (WatchdogSec in deploy/msp_sender.service). No-op off systemd."""
++    import os
++    addr = os.environ.get("NOTIFY_SOCKET")
++    if not addr:
++        return
++    try:
++        if not sock_cache:
++            sock_cache.append(socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM))
++        sock_cache[0].sendto(b"WATCHDOG=1", "\0" + addr[1:] if addr.startswith("@") else addr)
++    except OSError:
++        pass
++
++
+ def _stop(signum, frame):
+     raise KeyboardInterrupt
+ 
+@@ -176,7 +222,8 @@ def main(argv=None):
+             break
+         except serial.SerialException as e:
+             print(f"msp_sender: cannot open {args.port} ({e}); retrying", flush=True)
+-            time.sleep(1.0)
++            _notify()                                # waiting for the cable is not a hang
++            time.sleep(0.5)
+     baro = Baro()
+     baro.start()                                     # reads on a side thread: a read blocks 1-2 s
+     print(f"msp_sender: {args.port} at {args.baud}, barometer {'found' if baro.dir else 'NOT found (no height hold)'}", flush=True)
+@@ -210,7 +257,11 @@ def main(argv=None):
+                     a = tele["att"]
+                     tilt = "no reply from the FC" if a is None else \
+                         f"roll {math.degrees(a[1]):+6.1f} pitch {math.degrees(a[2]):+6.1f} yaw {math.degrees(a[3]):6.1f}"
+-                    print(f"{tilt} | height {tele['alt']} | engaged {tele['engaged']} | sent {tele['sent']} | rc {tele['rc']}", flush=True)
++                    imu = tele.get("imu")
++                    imu = "" if not imu else (f" | acc {math.sqrt(sum(a * a for a in imu[1])):.2f} g"
++                                             f" gyro {imu[2]} deg/s")     # BETAFLIGHT CHANGE: |acc| ~1.00 g at rest
++                    print(f"{tilt} | height {tele['alt']} | engaged {tele['engaged']} | sent {tele['sent']} | rc {tele['rc']}{imu}", flush=True)
++            _notify()                                # BETAFLIGHT CHANGE: systemd watchdog
+             next_tick += 1.0 / config.BF_SEND_HZ
+             time.sleep(max(0.0, next_tick - time.monotonic()))
+     except KeyboardInterrupt:
+diff --git a/link/stick_curve.py b/link/stick_curve.py
+new file mode 100644
+index 0000000..54a97e7
+--- /dev/null
++++ b/link/stick_curve.py
+@@ -0,0 +1,118 @@
++# =====================================================================================
++# link/stick_curve.py  -  how far Betaflight REALLY leans for a stick value (ANGLE mode)
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   We send Betaflight stick values (1000-2000 us, 1500 = centre). In ANGLE mode the stick
++#   means "lean this many degrees". The old code assumed a straight line: half stick = half
++#   of angle_limit. Betaflight 4.5 and 2025.12 do NOT work like that: the stick first goes
++#   through the pilot's "rates" curve, so near the centre the drone leans much less than the
++#   straight line says (default Actual rates: about 3 times less). Our 8-degree command came
++#   out as about 2 degrees: far too weak to hold position, and in a wind simulation every
++#   hold failed. This file holds Betaflight's own curve and its exact inverse, so the
++#   controller asks for DEGREES and we send the stick value that gives exactly that lean.
++#
++# HOW IT WORKS (technical)
++#   Betaflight (pid.c, ANGLE mode, 4.5+):  angle = angle_limit * rate(stick) / rate(full stick)
++#   rate() = Betaflight's rates function (rc.c applyActualRates / applyBetaflightRates).
++#   Check against Betaflight's documentation: with angle_limit 60, default Actual rates give
++#   a centre sensitivity of 6.3 deg and default Betaflight rates 18 deg; this file gives 6.4
++#   and 18.0 (tests/test_stick_curve.py). The inverse is a bisection (the curve only rises).
++#   Deadband (rc deadband) is respected.
++#
++# CHECK ON THE AIRCRAFT (props off, Betaflight CLI, read only, no `save`):
++#   get angle_limit        -> config.BF_ANGLE_LIMIT_DEG
++#   get rates_type         -> config.BF_RATES_TYPE ("ACTUAL" or "BETAFLIGHT")
++#   get roll_rc_rate, roll_srate, roll_expo (pitch the same) -> config.BF_RC_RATE / BF_SRATE / BF_EXPO
++#   get deadband           -> config.BF_DEADBAND_US
++#   Then `python -m link.stick_curve` prints the stick value for 1-20 degrees.
++#   If the crew cannot give them: ask which rates type is used; the defaults below are
++#   Betaflight's own defaults.
++#
++# REFERENCES
++#   - Betaflight source, src/main/fc/rc.c (applyActualRates, applyBetaflightRates) and
++#     src/main/flight/pid.c (angle mode target from the setpoint rate), 4.5 / 2025.12.
++#   - Betaflight Configurator PR 3910/3927: "Angle Mode centre sensitivity" (6.3 / 18 deg).
++# =====================================================================================
++from dataclasses import dataclass
++
++import config
++
++RC_RATE_INCREMENTAL = 14.54          # Betaflight constant for rc_rate above 2.0
++
++
++@dataclass
++class Rates:
++    rates_type: str = "ACTUAL"       # "ACTUAL" or "BETAFLIGHT"
++    rc_rate: int = 7                 # ACTUAL: centre sensitivity / 10 (7 = 70 deg/s). BETAFLIGHT: rc_rate x 100
++    srate: int = 67                  # ACTUAL: max rate / 10 (67 = 670 deg/s).        BETAFLIGHT: super rate x 100
++    expo: int = 0                    # x 100
++    angle_limit: float = 60.0        # degrees of lean at full stick
++    deadband: int = 0                # microseconds around 1500 that count as centre
++
++
++def from_config():
++    """The rates the event aircraft uses (config.py BF_*)."""
++    return Rates(config.BF_RATES_TYPE, config.BF_RC_RATE, config.BF_SRATE, config.BF_EXPO,
++                 config.BF_ANGLE_LIMIT_DEG, config.BF_DEADBAND_US)
++
++
++def _rate(x, r):
++    """Betaflight's setpoint rate (deg/s) for a stick deflection x in [-1, 1]."""
++    ax = abs(x)
++    if r.rates_type.upper() == "BETAFLIGHT":
++        if r.expo:
++            e = r.expo / 100.0
++            x = x * ax ** 3 * e + x * (1 - e)
++        rc = r.rc_rate / 100.0
++        if rc > 2.0:
++            rc += RC_RATE_INCREMENTAL * (rc - 2.0)
++        rate = 200.0 * rc * x
++        if r.srate:
++            rate *= 1.0 / max(0.01, min(1.0, 1.0 - ax * r.srate / 100.0))
++        return rate
++    e = r.expo / 100.0                                   # ACTUAL rates
++    curve = ax * (x ** 5 * e + x * (1 - e))
++    centre = r.rc_rate * 10.0
++    movement = max(0.0, r.srate * 10.0 - centre)
++    return x * centre + movement * curve
++
++
++def angle_from_us(us, r=None):
++    """Stick value (us) -> the lean Betaflight will hold (degrees, + = roll right / pitch forward)."""
++    r = r or from_config()
++    d = us - 1500.0
++    if abs(d) <= r.deadband:
++        return 0.0
++    d = (abs(d) - r.deadband) * (1 if d > 0 else -1)
++    x = max(-1.0, min(1.0, d / (500.0 - r.deadband)))
++    return r.angle_limit * _rate(x, r) / _rate(1.0, r)
++
++
++def us_from_angle(deg, r=None):
++    """Lean wanted (degrees) -> the stick value that gives exactly that lean. Exact inverse (bisection)."""
++    r = r or from_config()
++    deg = max(-r.angle_limit, min(r.angle_limit, deg))
++    if deg == 0.0:
++        return 1500.0
++    lo, hi = 1000.0, 2000.0
++    for _ in range(30):
++        mid = (lo + hi) / 2
++        if angle_from_us(mid, r) < deg:
++            lo = mid
++        else:
++            hi = mid
++    return (lo + hi) / 2
++
++
++def centre_sensitivity(r=None):
++    """The number Betaflight Configurator shows: the lean at full stick if the centre slope continued."""
++    r = r or from_config()
++    return angle_from_us(1500 + r.deadband + 1, r) * (500 - r.deadband)
++
++
++if __name__ == "__main__":                              # bench: what will we send for each lean?
++    r = from_config()
++    print(f"{r}\ncentre sensitivity {centre_sensitivity(r):.1f} deg (Configurator shows the same number)")
++    for deg in (1, 2, 3, 5, 8, 10, 15, 20):
++        print(f"lean {deg:2d} deg -> stick {us_from_angle(deg, r) - 1500:+6.1f} us"
++              f"   (old straight line: {500 * deg / r.angle_limit:+6.1f} us)")
+diff --git a/recovery/recovery.py b/recovery/recovery.py
+index cc01adb..fbbac4b 100644
+--- a/recovery/recovery.py
++++ b/recovery/recovery.py
+@@ -24,7 +24,9 @@
+ #   - Stage 2 (bench loop + recovery bonus): the FIRST home picture's fingerprints are kept
+ #     as well (set_home(origin=True)). find_origin() looks for it; vision_hold.py calls that
+ #     now and then while the reference is a later picture, and switches back when found.
+-#     Known limit: a floor of identical tiles can match one tile off.
++#     Known limit: a floor of identical tiles can match one tile off. BETAFLIGHT CHANGE: matches must
++#     pass Lowe's ratio test (config.RECOVERY_RATIO): a fingerprint that fits two places about
++#     equally well (identical tiles) is not used. Lowe, IJCV 2004, section 7.1.
+ #
+ # WHERE IT PLUGS IN
+ #   vision_hold.py, after health.check(). Uses tracker.relock(), which Saumya already
+@@ -103,7 +105,14 @@ class Recovery:
+         kp, des = self.orb.detectAndCompute(gray, None)
+         if des is None or len(kp) < self.min_inliers:
+             return None, 0
+-        matches = self.matcher.match(home_des, des)
++        ratio = getattr(config, "RECOVERY_RATIO", 0)
++        if ratio:                                    # BETAFLIGHT CHANGE: Lowe ratio test (identical floor tiles)
++            if not hasattr(self, "_knn"):
++                self._knn = cv2.BFMatcher(cv2.NORM_HAMMING)
++            pairs = self._knn.knnMatch(home_des, des, k=2)
++            matches = [p[0] for p in pairs if len(p) == 2 and p[0].distance < ratio * p[1].distance]
++        else:
++            matches = self.matcher.match(home_des, des)
+         if len(matches) < self.min_inliers:
+             return None, 0
+         src = home_pts[[m.queryIdx for m in matches]]
+diff --git a/tests/test_betaflight.py b/tests/test_betaflight.py
+index 956da41..5e340a3 100644
+--- a/tests/test_betaflight.py
++++ b/tests/test_betaflight.py
+@@ -28,7 +28,7 @@ import tempfile
+ 
+ import config
+ from fusion import position_controller as pc
+-from link import msp
++from link import msp, stick_curve
+ from link.apb_sensors import Baro, Gyro, pressure_to_height
+ from link.betaflight_link import BetaflightLink
+ from link.msp_sender import Sender
+@@ -100,7 +100,8 @@ check = 0
+ for b in f[3:-1]:
+     check ^= b
+ assert check == f[-1], "checksum = XOR of size, command, payload"
+-assert struct.unpack("<8H", f[5:-1]) == (1500, 1490, 1300, 1500, 1500, 1500, 1500, 1500), "order roll, pitch, throttle, yaw"
++A = config.BF_AUX_US                                                # BETAFLIGHT CHANGE: AUX "off" (1000), not 1500
++assert struct.unpack("<8H", f[5:-1]) == (1500, 1490, 1300, 1500, A, A, A, A), "order roll, pitch, throttle, yaw"
+ for gps in (106, 107, 164, 166):                                    # MSP_RAW_GPS, COMP_GPS, GPSSVINFO, GPSSTATISTICS
+     try:
+         msp.request(gps)
+@@ -169,16 +170,19 @@ fc.rc[9] = 1000
+ t = run(s, t, 0.1)
+ 
+ print("\nTest 5: the lean is capped twice (controller, then sender)")
+-most = 500 * config.BF_MAX_TILT_DEG / config.BF_ANGLE_LIMIT_DEG
++# BETAFLIGHT CHANGE: the cap is in DEGREES of real lean, through Betaflight's own stick curve (link/stick_curve.py)
++lean = lambda us: abs(stick_curve.angle_from_us(us))
++most = config.BF_MAX_TILT_DEG + 0.1
+ roll, pitch = pc.sticks(50.0, -50.0, 0.0, 0.0)                      # 50 m away: still only BF_MAX_TILT_DEG
+-assert abs(roll - 1500) <= most + 1 and abs(pitch - 1500) <= most + 1
++assert lean(roll) <= most and lean(pitch) <= most
+ fc.rc[9] = 2000
+ t = run(s, t, 0.1)
+ s.set_target(1000, 2000, t)                                         # something asks for full stick
+ s.step(t)
+ r, pch = fc.sticks()[:2]
+-assert abs(r - 1500) <= most + 1 and abs(pch - 1500) <= most + 1 and r > 1000 and pch < 2000
+-print(f"  asked for (1000, 2000), sent ({r}, {pch}): at most {config.BF_MAX_TILT_DEG:g} deg of {config.BF_ANGLE_LIMIT_DEG:g}")
++assert lean(r) <= most and lean(pch) <= most and r > 1000 and pch < 2000 and lean(r) > config.BF_MAX_TILT_DEG - 0.2
++print(f"  asked for (1000, 2000), sent ({r}, {pch}) = {lean(r):.1f} deg of real lean "
++      f"(cap {config.BF_MAX_TILT_DEG:g} deg, Betaflight curve, angle_limit {config.BF_ANGLE_LIMIT_DEG:g})")
+ 
+ print("\nTest 6: throttle = pilot's value at engage, nudged to hold the engage height, bounded")
+ fc2, baro2 = FakeFC(), FakeBaro()
+@@ -307,12 +311,12 @@ assert Baro(os.path.join(root, "nothing")).height() is None and Gyro(os.path.joi
+ 
+ print("\nTest 10: nothing we ever sent asked for GNSS (Stage 2 section 04)")
+ commands = {c for port in (fc, fc2, s3.port) for c, _ in port.sent}
+-print(f"  MSP commands sent in this whole test: {sorted(commands)} (200 sticks, 108 tilt, 105 radio channels)")
+-assert commands == {msp.MSP_SET_RAW_RC, msp.MSP_ATTITUDE, msp.MSP_RC}
++print(f"  MSP commands sent in this whole test: {sorted(commands)} (200 sticks, 108 tilt, 105 radio channels, 102 raw IMU)")
++assert commands == {msp.MSP_SET_RAW_RC, msp.MSP_ATTITUDE, msp.MSP_RC, msp.MSP_RAW_IMU}
+ for port in (fc, fc2, s3.port):
+     for c, payload in port.sent:
+         if c == msp.MSP_SET_RAW_RC:
+             r, pch, thr, yaw = struct.unpack("<8H", payload)[:4]
+             assert yaw == 1500 and config.BF_THROTTLE_MIN <= thr <= config.BF_THROTTLE_MAX
+-            assert abs(r - 1500) <= most + 1 and abs(pch - 1500) <= most + 1, "never anywhere near minimum values"
++            assert lean(r) <= most and lean(pch) <= most, "never anywhere near minimum values"
+ print("\nALL BETAFLIGHT TESTS PASSED (simulated flight controller: confirm signs on the real aircraft)")
+diff --git a/tests/test_bf_hold.py b/tests/test_bf_hold.py
+new file mode 100644
+index 0000000..038b913
+--- /dev/null
++++ b/tests/test_bf_hold.py
+@@ -0,0 +1,143 @@
++# =====================================================================================
++# tests/test_bf_hold.py  -  30 s holds in wind through the REAL Betaflight-route code (BETAFLIGHT CHANGE)
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   No simulator exists for the Betaflight route, so this test is a small one: a drone that
++#   leans the way Betaflight's ANGLE mode makes it lean (through its stick curve), blown by
++#   wind with gusts, seen by a camera that is 75 ms late at 13 frames a second with a small
++#   tilt error. Our REAL code flies it: fusion/position_controller.HoldController, the
++#   sender's lean cap (link/msp_sender.cap_stick) and link/stick_curve.py. Judged like the
++#   organisers' hold_judge.py: 30 s within 3 m horizontally (Stage 2 section 06).
++#     1. sideways hold at 10, 35 and 75 m: every hold qualifies
++#     2. the code before these changes (straight-line stick, PD only, 8 deg cap) fails
++#     3. engaging is smooth: the I term starts at the pilot's lean into the wind
++#     4. height hold (sender's AltHold): noisy barometer (+-0.4 m), battery sag, the pilot's
++#        throttle a little off: the height stays within 2 m
++#     5. bench step 5: a judge's hand tilt at the engage moment must NOT offset the answer
++#        (the I term starts at the pilot's lean only when ARMED)
++#   SIMULATION, not flight: it proves the logic and the starting gains are sane; the real
++#   aircraft must confirm them (start weaker rather than stronger).
++# RUN:  python -m tests.test_bf_hold   (~30 s)
++# =====================================================================================
++import math
++
++import numpy as np
++
++import config
++from fusion.position_controller import AltHold, HoldController
++from link import stick_curve
++from link.msp_sender import cap_stick
++
++G = 9.81
++rng = np.random.default_rng(42)
++
++
++def ou(n, dt, sigma, tau):
++    x, a = np.zeros(n), dt / tau
++    for i in range(1, n):
++        x[i] = x[i - 1] - a * x[i - 1] + sigma * math.sqrt(2 * a) * rng.normal()
++    return x
++
++
++def hold(h, wind=None, old=False, seconds=30.0):
++    dt, n = 1 / 200, int(seconds * 200)
++    w = rng.uniform(3, 7) if wind is None else wind
++    wd = rng.uniform(0, 2 * np.pi)
++    wv = np.c_[w * math.cos(wd) + ou(n, dt, 1.5, 3.0), w * math.sin(wd) + ou(n, dt, 1.5, 3.0)]
++    att_err = np.c_[ou(n, dt, math.radians(0.4), 5.0), ou(n, dt, math.radians(0.4), 5.0)]
++    cd = 0.28
++    tilt = np.arctan(-cd * wv[0] / G)                    # the pilot is holding into the wind at engage
++    pos, vel = np.zeros(2), rng.uniform(-0.3, 0.3, 2)
++    ctl = HoldController()
++    ctl.engage(lean_fwd_deg=math.degrees(tilt[0]), lean_right_deg=math.degrees(tilt[1]))
++    sticks = (cap_stick(stick_curve.us_from_angle(math.degrees(tilt[1]))),
++              cap_stick(stick_curve.us_from_angle(math.degrees(tilt[0]))))
++    queue, prev, vel_est, worst, within = [], None, np.zeros(2), 0.0, seconds
++    for k in range(n):
++        t = k * dt
++        target = np.radians([stick_curve.angle_from_us(sticks[1]), stick_curve.angle_from_us(sticks[0])])  # (N, E)
++        tilt += (target - tilt) * dt / 0.12              # Betaflight ANGLE mode follows with a short lag
++        acc = G * np.tan(tilt) - cd * (vel - wv[k])
++        vel += acc * dt
++        pos += vel * dt
++        e = float(np.hypot(*pos))
++        worst = max(worst, e)
++        if within == seconds and e > config.HOLD_MAX_DRIFT_M:
++            within = t
++        if k % 15 == 0:                                  # camera ~13 fps, result 75 ms late
++            queue.append((t + 0.075, t, pos + h * np.tan(att_err[k]) + rng.normal(0, 0.2 * h / 208, 2)))
++        while queue and queue[0][0] <= t:
++            _, tc, m = queue.pop(0)
++            if prev is not None:                         # vision_hold.py's velocity: 0.7 / 0.3 smoothing
++                vel_est = 0.7 * vel_est + 0.3 * (m - prev[0]) / (tc - prev[1])
++            prev = (m, tc)
++            if old:                                      # the code before: straight line, PD, 8 deg
++                lean = np.clip(-(6.0 * m + 10.0 * vel_est), -8.0, 8.0)
++                sticks = (1500 + 500 * lean[1] / 60, 1500 + 500 * lean[0] / 60)
++            else:
++                r, p = ctl.update(tc, m[0], m[1], vel_est[0], vel_est[1], 0.0, integrate=True)
++                sticks = (cap_stick(r), cap_stick(p))
++    return within >= seconds, worst
++
++
++print("Test 1: 30 s holds, wind 3-7 m/s with gusts, through the real controller + stick curve + sender cap")
++for h in (10, 35, 75):
++    r = [hold(h) for _ in range(6)]
++    q = sum(ok for ok, _ in r)
++    print(f"  {h:2d} m: {q}/6 qualifying, worst {max(w for _, w in r):.2f} m")
++    assert q == 6
++
++print("\nTest 2: the code before these changes (straight-line stick, PD only, 8 deg cap), same wind")
++r = [hold(10, old=True) for _ in range(4)]
++print(f"  10 m: {sum(ok for ok, _ in r)}/4 qualifying, worst {max(w for _, w in r):.1f} m")
++assert sum(ok for ok, _ in r) <= 1
++
++print("\nTest 3: engaging in a steady 6 m/s wind is smooth (I term starts at the pilot's lean)")
++ok, worst = hold(20, wind=6.0, seconds=5.0)
++print(f"  first 5 s after engage: worst {worst:.2f} m")
++assert worst < 1.0
++
++print("\nTest 4: height hold: barometer +-0.4 m noise at 16 Hz, battery sag, pilot throttle 20 us off")
++worst_z = 0.0
++for trial in range(4):
++    dt, n = 1 / 50, 30 * 50
++    hover, k_thr = 1450.0, G / (1450 - 1050)             # m/s^2 per us
++    z = vz = 0.0
++    alt, climb, alt_t, baro = 0.0, 0.0, None, 0.0
++    ah, pilot = AltHold(), hover + rng.choice([-20, 20])
++    for k in range(n):
++        t = k * dt
++        if k % 3 == 0:                                   # the APB barometer at ~16 Hz
++            baro = z + rng.normal(0, 0.4)
++        new = alt + 0.2 * (baro - alt)                   # the sender's smoothing (msp_sender._height)
++        kk = min(1.0, dt / config.BF_CLIMB_SMOOTH_S)
++        climb += kk * ((new - alt) / dt - climb)
++        alt = new
++        thr = ah.update(t, pilot, 0.0 - alt, climb)
++        sag = 15.0 * t / 60
++        az = (thr - (hover + sag)) * k_thr - 0.3 * vz + rng.normal(0, 0.3)
++        vz += az * dt
++        z += vz * dt
++        worst_z = max(worst_z, abs(z))
++print(f"  worst height change over 4 holds: {worst_z:.2f} m (limit {config.HOLD_MAX_VERTICAL_M} m)")
++assert worst_z < config.HOLD_MAX_VERTICAL_M
++print("\nTest 5: bench step 5 with the judge's hand tilted 4 deg at the engage moment")
++from link.betaflight_link import BetaflightLink
++for armed in (False, True):
++    link = BetaflightLink()
++    rc = [1500, 1500, 1500, 1420, 2000 if armed else 1000, 1500, 1500, 1500, 1500, 1000]
++    base = dict(t=1.0, att=(1.0, math.radians(4.0), 0.0, 0.0), alt=None, rc=rc)   # tilted 4 deg RIGHT
++    link.on_telemetry(dict(base, engaged=False))
++    link.send_odometry(1.0, 0.0, 0.0, 0.0, (0, 0, 0), (0, 0, 0), 90, reset_counter=1)
++    link.on_telemetry(dict(base, engaged=True))
++    link.send_odometry(1.1, 0.0, 0.0, 0.0, (0, 0, 0), (0, 0, 0), 90, reset_counter=2)   # new home saved
++    held = link.last_sticks
++    link.send_odometry(1.2, 0.0, 0.5, 0.0, (0, 0, 0), (0, 0, 0), 90, reset_counter=2)   # moved 0.5 m RIGHT
++    moved = link.last_sticks
++    print(f"  {'armed (flight)' if armed else 'disarmed (bench)'}: at home roll {held[0]}, 0.5 m right roll {moved[0]}")
++    if armed:
++        assert held[0] > 1500, "flight: the pilot's lean is kept at engage (smooth, no wind offset)"
++    else:
++        assert held[0] == 1500 and moved[0] < 1500, "bench: a hand tilt must not offset the step 5 answer"
++
++print("\nALL BETAFLIGHT HOLD TESTS PASSED (simulation: confirm gains on the aircraft, start weaker)")
+diff --git a/tests/test_bf_route.py b/tests/test_bf_route.py
+new file mode 100644
+index 0000000..3a77fab
+--- /dev/null
++++ b/tests/test_bf_route.py
+@@ -0,0 +1,119 @@
++# =====================================================================================
++# tests/test_bf_route.py  -  vision_hold.py on the Betaflight route, end to end (BETAFLIGHT CHANGE)
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   Runs the REAL vision_hold.py with --fc betaflight on a made-up camera video, with a
++#   pretend msp_sender on the same local network ports the real one uses. The pretend sender
++#   reports the radio (disarmed bench, then the engage switch CH10 on) and the raw IMU, and
++#   records every stick request vision_hold.py sends. The video: the drone turns 15 degrees
++#   (Betaflight's own heading says something else entirely: it must be ignored), then the
++#   judge flips the switch, then moves the aircraft 0.3 m to its RIGHT. Bench step 5 says
++#   roll must push LEFT (below 1500) and pitch stay about centred.
++#   Checks: home saved, centred sticks before engage, the engage re-home, roll < 1500 and
++#   pitch ~1500 after the move, nothing crashed (the log has rows).
++# RUN:  python -m tests.test_bf_route   (~12 s, real time)
++# =====================================================================================
++import csv
++import json
++import math
++import os
++import socket
++import tempfile
++import threading
++import time
++
++import cv2
++import numpy as np
++
++import config
++import vision_hold
++
++W, H, FPS, SECONDS = 640, 360, 15, 9.0
++F = 623.0 * W / 1920                                     # the datasheet calib.npz scaled to 640 wide
++ENGAGE_AT, MOVE_FROM, MOVE_TO = 3.5, 5.0, 6.5            # seconds from the start
++rng = np.random.default_rng(3)
++floor = cv2.GaussianBlur(rng.normal(128, 45, (1400, 1400)).astype(np.float32), (0, 0), 1.6)
++floor = np.clip(floor, 0, 255).astype(np.uint8)
++
++
++def pose(t):
++    """(x right of start in metres, yaw in degrees) of the drone at video time t."""
++    yaw = 15.0 * min(1.0, max(0.0, (t - 1.0) / 1.0))     # turns 15 deg right between 1 and 2 s
++    x = 0.3 * min(1.0, max(0.0, (t - MOVE_FROM) / (MOVE_TO - MOVE_FROM)))
++    return x, yaw
++
++
++def render(t):
++    x, yaw = pose(t)
++    c = math.radians(yaw)
++    # camera moves x metres along its own RIGHT axis (as it points after the turn): image content moves left
++    dx_px, dy_px = x * F * math.cos(c), x * F * math.sin(c)
++    M = cv2.getRotationMatrix2D((700 + dx_px, 700 + dy_px), yaw, 1.0)   # turn right -> picture turns the other way
++    M[0, 2] += W / 2 - (700 + dx_px)
++    M[1, 2] += H / 2 - (700 + dy_px)
++    img = cv2.warpAffine(floor, M, (W, H), flags=cv2.INTER_LINEAR).astype(np.float32)
++    return np.clip(img + rng.normal(0, 2.0, img.shape), 0, 255).astype(np.uint8)   # sensor noise: never 'frozen'
++
++
++tmp = tempfile.mkdtemp()
++video = os.path.join(tmp, "bench.avi")
++vw = cv2.VideoWriter(video, cv2.VideoWriter_fourcc(*"MJPG"), FPS, (W, H), False)
++for i in range(int(SECONDS * FPS)):
++    vw.write(render(i / FPS))
++vw.release()
++
++requests, stop = [], threading.Event()
++t0 = [None]
++
++
++def fake_sender():
++    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++    rx.bind(("127.0.0.1", config.BF_SENDER_PORT))
++    rx.setblocking(False)
++    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++    while not stop.is_set():
++        now = time.time()
++        t = now - t0[0]
++        engaged = t >= ENGAGE_AT
++        rc = [1500, 1500, 1500, 1000, 1000, 1500, 1500, 1500, 1500, 2000 if engaged else 1000] + [1500] * 6
++        moving = MOVE_FROM <= t <= MOVE_TO
++        acc = [0.0 + (0.06 * math.sin(11 * t) if moving else 0.0), 0.0, 1.0]
++        tele = dict(t=now, att=[now, 0.0, 0.0, math.radians(123.0)],   # Betaflight's heading: nonsense on purpose
++                    alt=None, rc=rc, engaged=engaged, sent=[1500, 1500, 1300, 1500], imu=[now, acc, [0, 0, 0]])
++        try:
++            tx.sendto(json.dumps(tele).encode(), ("127.0.0.1", config.BF_TELEMETRY_PORT))
++        except OSError:
++            pass
++        try:
++            while True:
++                msg = json.loads(rx.recv(512))
++                requests.append((time.time() - t0[0], msg["roll"], msg["pitch"]))
++        except (BlockingIOError, ValueError):
++            pass
++        time.sleep(0.02)
++
++
++t0[0] = time.time()
++th = threading.Thread(target=fake_sender, daemon=True)
++th.start()
++log = os.path.join(tmp, "flight.csv")
++vision_hold.main(["--fc", "betaflight", "--camera", video, "--max-seconds", str(SECONDS + 1), "--log", log])
++stop.set()
++th.join(1.0)
++
++with open(log) as f:
++    rows = list(csv.DictReader(f))
++print(f"Test 1: the program ran: {len(rows)} logged frames, {len(requests)} stick requests")
++assert len(rows) > 50 and len(requests) > 50
++
++before = [(r, p) for t, r, p in requests if t < ENGAGE_AT - 0.3]
++print(f"\nTest 2: before engage every request is centred ({len(before)} requests)")
++assert before and all((r, p) == (1500, 1500) for r, p in before)
++
++after = [(r, p) for t, r, p in requests if MOVE_TO + 0.3 <= t <= MOVE_TO + 1.5]
++print(f"\nTest 3: moved 0.3 m to the right after engage -> roll pushes LEFT, pitch about centred "
++      f"({len(after)} requests, last {after[-1] if after else None})")
++assert after and all(r < 1500 for r, _ in after)
++assert all(abs(p - 1500) < abs(r - 1500) / 3 + 3 for r, p in after), "the push must be sideways, not forward/back"
++print("  (the drone had turned 15 deg and Betaflight's heading said 123 deg: neither mattered)")
++print("\nALL BETAFLIGHT ROUTE TESTS PASSED (pretend sender and camera: confirm on the aircraft)")
+diff --git a/tests/test_frozen.py b/tests/test_frozen.py
+new file mode 100644
+index 0000000..9694c92
+--- /dev/null
++++ b/tests/test_frozen.py
+@@ -0,0 +1,125 @@
++# =====================================================================================
++# tests/test_frozen.py  -  the holder's legs must not fool the tracker (BETAFLIGHT CHANGE)
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   Bench: a judge carries the aircraft 1 m over a plain floor. Part of the picture shows
++#   the judge's shoes and legs (strong texture) that move WITH the camera, so in the picture
++#   they stay put while the plain floor slides. Through Saumya's real tracker:
++#     1. the old corner search put ALL its corners on the legs (none on the floor); the
++#        per-cell search (config.CORNERS_PER_CELL) gives the floor its share;
++#     2. legs fill most of the picture: without vision/frozen.py (+ the tracker's
++#        "second-best motion" check) the legs win and the motion is wrong; with it, right;
++#     3. standing still, nothing is dropped.
++# RUN:  python -m tests.test_frozen   (~3 s)
++# =====================================================================================
++import cv2
++import numpy as np
++
++import config
++from health.health import HealthChecker
++from vision.enhance import enhance
++from vision.frozen import FrozenFilter
++from vision.rehome import Rehome
++from vision.rolling_shutter import RollingShutterTracker
++from vision.tracker import GroundTracker
++
++W, H = 640, 360
++rng = np.random.default_rng(1)
++floor = cv2.GaussianBlur(rng.normal(128, 9, (H + 200, W + 600)).astype(np.float32), (0, 0), 2.2)
++legs = cv2.GaussianBlur(rng.normal(128, 70, (H, 300)).astype(np.float32), (0, 0), 1.2)
++legs = cv2.GaussianBlur(rng.normal(128, 70, (H, W)).astype(np.float32), (0, 0), 1.2)
++legs_mask = np.zeros((H, W), bool)
++
++
++def set_legs(width):
++    legs_mask[:] = False
++    legs_mask[:, :width] = True                         # the left part of the picture: shoes and legs
++
++
++def frame(dx):
++    img = floor[100:100 + H, 300 + dx:300 + dx + W].copy()
++    img[legs_mask] = legs[legs_mask]
++    return np.clip(img + rng.normal(0, 1.0, img.shape), 0, 255).astype(np.uint8)
++
++
++def run(use_filter, speed_px=6, frames=40, moving=True):
++    tr = GroundTracker()
++    tr.set_reference(frame(0))
++    ff = FrozenFilter()
++    res = None
++    for i in range(1, frames + 1):
++        t = i / 15.0
++        tr.exclude = ff.for_tracker(tr) if use_filter else None
++        tr.reject_static = use_filter and moving          # what vision_hold.py sets from the accelerometer
++        res = tr.track(frame(speed_px * i if moving else 0), t)
++        if use_filter:
++            ff.update(t, tr.last_cur, tr.last_valid, moving)
++    true_dx = speed_px * frames if moving else 0
++    got = res.shift_px[0] if res.ok else float("nan")
++    n_att = int(ff.attached.sum()) if use_filter else 0
++    on_legs = 0
++    if use_filter:
++        pts = tr.ref_pts.reshape(-1, 2).astype(int)
++        on_legs = int(legs_mask[pts[:, 1].clip(0, H - 1), pts[:, 0].clip(0, W - 1)].sum())
++    return true_dx, got, n_att, on_legs, res
++
++
++def floor_corners():
++    tr = GroundTracker()
++    tr.set_reference(frame(0))
++    pts = tr.ref_pts.reshape(-1, 2).astype(int)
++    return int((~legs_mask[pts[:, 1].clip(0, H - 1), pts[:, 0].clip(0, W - 1)]).sum()), len(pts)
++
++
++print("Test 1: legs in the left third, plain floor: do any home corners land on the FLOOR?")
++set_legs(230)
++config.CORNERS_PER_CELL = False
++old_floor, old_n = floor_corners()
++config.CORNERS_PER_CELL = True
++new_floor, new_n = floor_corners()
++print(f"  old corner search: {old_floor} of {old_n} on the floor | per-cell search (config.CORNERS_PER_CELL): "
++      f"{new_floor} of {new_n} on the floor")
++assert old_floor == 0 and new_floor >= 0.3 * new_n
++
++def chain(width, seed, use_filter, frames=40, speed=6):
++    """The whole bench chain as vision_hold.py runs it: contrast boost, tracker, frozen filter, health, re-homes."""
++    global floor, legs, rng
++    rng = np.random.default_rng(seed)
++    floor = cv2.GaussianBlur(rng.normal(128, 9, (H + 200, W + 600)).astype(np.float32), (0, 0), 2.2)
++    legs = cv2.GaussianBlur(rng.normal(128, 70, (H, W)).astype(np.float32), (0, 0), 1.2)
++    set_legs(width)
++    tr = RollingShutterTracker(attitude_history=[], enabled=False)   # the tracker vision_hold.py uses
++    ff, hc, rh = FrozenFilter(), HealthChecker(), Rehome()
++    tr.set_reference(enhance(frame(0)))
++    off = total = 0.0
++    for i in range(1, frames + 1):
++        t, img = i / 15.0, enhance(frame(speed * i))
++        tr.exclude = ff.for_tracker(tr) if use_filter else None
++        tr.reject_static = use_filter                   # carried the whole time
++        res = tr.track(img, t)
++        if use_filter:
++            ff.update(t, tr.last_cur, tr.last_valid, True)
++        rep = hc.check(img, res)
++        if res.ok and rep.status == "OK":
++            total = off + res.shift_px[0]
++            if rh.due(rep.status, res, (W, H), inlier_drop=use_filter):
++                if rh.rehome(tr, hc, img, t, total, 0.0, 50):
++                    off = total
++    return speed * frames, total
++
++
++print("\nTest 2: the whole bench chain, carried 240 px (about 1.2 m at 1 m up), legs in view, 4 floors each")
++for width in (230, 390):                                # a third, and 60% of the picture
++    res = {f: [chain(width, seed, f) for seed in range(4)] for f in (False, True)}
++    right = {f: sum(abs(got - true) < 5 for true, got in res[f]) for f in res}
++    print(f"  legs {width / W:4.0%} of the picture: right without the filter {right[False]}/4, with it {right[True]}/4 "
++          f"({', '.join(f'{got:.0f}' for _, got in res[True])} px of 240)")
++    assert right[True] == 4, "with the filter every carry must come out right"
++    if width == 390:
++        assert right[False] <= 1, "this scene must fool the tracker without the filter (else the test proves nothing)"
++
++print("\nTest 3: held still -> nothing is dropped (the accelerometer says 'not moving')")
++_, got, n_att, _, _ = run(True, moving=False)
++print(f"  shift {got:.2f} px, {n_att} spots dropped")
++assert n_att == 0 and abs(got) < 1.0
++print(f"\nALL FROZEN-FILTER TESTS PASSED (window {config.FROZEN_WINDOW_S} s, still {config.FROZEN_STILL_PX} px)")
+diff --git a/tests/test_scale.py b/tests/test_scale.py
+new file mode 100644
+index 0000000..1206f7e
+--- /dev/null
++++ b/tests/test_scale.py
+@@ -0,0 +1,65 @@
++# =====================================================================================
++# tests/test_scale.py  -  bench height from motion (BETAFLIGHT CHANGE, fusion/scale.py)
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   A pretend judge carries the aircraft at a height we do NOT tell the code (0.7 to 1.3 m),
++#   walking with a natural sway. The accelerometer (with a tilt-error bias, noise, and its
++#   axes in a different order and sign than the camera's) and the camera (pixel noise) are
++#   simulated. The estimator must find the height within 10%, and say "don't know" when the
++#   aircraft is simply held still.
++# RUN:  python -m tests.test_scale   (~2 s)
++# =====================================================================================
++import math
++
++import numpy as np
++
++from fusion.scale import ImuIntegrator, ScaleEstimator, fuse
++
++F = 208.0
++rng = np.random.default_rng(5)
++
++
++def carry(h, walk=True, seconds=12.0):
++    fs = 200
++    t = np.arange(0, seconds, 1 / fs)
++    s = np.clip((t - 2) / 6, 0, 1)
++    env = np.sin(np.pi * s) ** 2 if walk else 0 * t
++    x = (1.2 * (s - np.sin(2 * np.pi * s) / (2 * np.pi)) if walk else 0 * t) + 0.018 * env * np.sin(2 * np.pi * 1.8 * t)
++    y = 0.012 * env * np.sin(np.pi * 1.8 * t + 1)
++    z = h + 0.01 * env * np.sin(2 * np.pi * 1.8 * t + 0.5)
++    return t, np.c_[x, y, z]
++
++
++def estimate(h, walk=True):
++    t, P = carry(h, walk)
++    dt = t[1] - t[0]
++    acc = np.gradient(np.gradient(P, dt, axis=0), dt, axis=0)
++    acc[:, 2] += 9.80665                                  # gravity on the vertical axis
++    acc += np.r_[np.radians(1.0) * 9.81, -np.radians(0.7) * 9.81, 0.0]   # tilt-error bias
++    acc += rng.normal(0, 0.03, acc.shape)
++    sensor = np.c_[-acc[:, 1], acc[:, 2], acc[:, 0]]      # sensor axes: other order and signs than the camera's
++    integ, est = ImuIntegrator(), ScaleEstimator()
++    for k in range(0, len(t), 8):                         # Betaflight raw IMU at 25 Hz
++        integ.add(t[k], sensor[k])
++        if k % 16 == 0:                                   # camera ~12 fps
++            u = P[k, :2] / P[k, 2] + rng.normal(0, 0.15 / F, 2)
++            est.update(t[k], integ.at(t[k]), (u[0], u[1], math.log(P[k, 2]) + rng.normal(0, 0.002)))
++    return est.estimate()
++
++
++print("Test 1: walking carry, unknown height, scrambled accelerometer axes")
++worst = 0.0
++for h in (0.7, 0.85, 1.0, 1.15, 1.3):
++    est, sig = estimate(h)
++    err = abs(est - h) / h
++    worst = max(worst, err)
++    print(f"  true {h:.2f} m -> estimated {est:.2f} +- {sig:.2f} m ({err:.1%})")
++    assert est is not None and err < 0.10
++print(f"  worst error {worst:.1%}")
++
++print("\nTest 2: held still -> 'don't know' (the bench guess stays)")
++est, sig = estimate(1.0, walk=False)
++print(f"  estimate {est}, sigma {sig}")
++assert est is None and math.isinf(sig)
++assert fuse(1.0, 0.25, None, math.inf) == 1.0 and abs(fuse(1.0, 0.25, 1.2, 0.02) - 1.2) < 0.01
++print("\nALL SCALE TESTS PASSED")
+diff --git a/tests/test_stick_curve.py b/tests/test_stick_curve.py
+new file mode 100644
+index 0000000..1d5e106
+--- /dev/null
++++ b/tests/test_stick_curve.py
+@@ -0,0 +1,42 @@
++# =====================================================================================
++# tests/test_stick_curve.py  -  Betaflight's real stick -> lean curve (BETAFLIGHT CHANGE)
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   Checks link/stick_curve.py against the numbers Betaflight itself documents, and that the
++#   inverse is exact, so "lean 5 degrees" really becomes the stick value that leans 5 degrees.
++#     1. centre sensitivity: default Actual rates 6.3 deg, default Betaflight rates 18 deg
++#        (Betaflight Configurator, angle_limit 60)
++#     2. the inverse is exact (to 0.001 deg) for several rate settings, and the curve only rises
++#     3. deadband: inside it the drone stays level; the inverse steps over it
++#     4. how wrong the old straight line was (printed for the slides)
++# RUN:  python -m tests.test_stick_curve   (< 1 s)
++# =====================================================================================
++from link.stick_curve import Rates, angle_from_us, centre_sensitivity, us_from_angle
++
++print("Test 1: centre sensitivity matches Betaflight's documentation")
++act, bfr = Rates(), Rates("BETAFLIGHT", 100, 70, 0)
++ca, cb = centre_sensitivity(act), centre_sensitivity(bfr)
++print(f"  default Actual rates {ca:.1f} deg (docs 6.3), default Betaflight rates {cb:.1f} deg (docs 18)")
++assert abs(ca - 6.3) < 0.2 and abs(cb - 18.0) < 0.2
++
++print("\nTest 2: exact inverse, rising curve, full stick = angle_limit")
++for r in (act, bfr, Rates(expo=50), Rates("BETAFLIGHT", 120, 75, 20), Rates(angle_limit=45)):
++    worst = max(abs(angle_from_us(us_from_angle(d / 10, r), r) - d / 10) for d in range(-400, 401))
++    seq = [angle_from_us(u, r) for u in range(1000, 2001, 5)]
++    assert worst < 1e-3 and all(b >= a for a, b in zip(seq, seq[1:])), r
++    assert abs(angle_from_us(2000, r) - r.angle_limit) < 1e-6 and abs(angle_from_us(1000, r) + r.angle_limit) < 1e-6
++print("  5 rate settings: inverse within 0.001 deg, curve never falls, full stick = angle_limit")
++
++print("\nTest 3: deadband")
++rd = Rates(deadband=5)
++assert angle_from_us(1504, rd) == 0.0 and angle_from_us(1496, rd) == 0.0
++assert us_from_angle(1.0, rd) > 1505 and abs(angle_from_us(us_from_angle(1.0, rd), rd) - 1.0) < 1e-3
++print("  +-5 us around 1500 = level; 1 deg lean steps over the deadband")
++
++print("\nTest 4: the old straight line vs Betaflight (default Actual rates, angle_limit 60)")
++for deg in (2, 5, 8, 15):
++    old = 1500 + 500 * deg / 60
++    print(f"  want {deg:2d} deg: old sent {old - 1500:5.1f} us -> Betaflight leans {angle_from_us(old, act):4.1f} deg;"
++          f" now sends {us_from_angle(deg, act) - 1500:5.1f} us")
++assert angle_from_us(1500 + 500 * 8 / 60, act) < 3.0            # the old 8 deg cap came out under 3 deg
++print("\nALL STICK CURVE TESTS PASSED")
+diff --git a/tests/test_thermal.py b/tests/test_thermal.py
+new file mode 100644
+index 0000000..b9d8cb7
+--- /dev/null
++++ b/tests/test_thermal.py
+@@ -0,0 +1,29 @@
++# =====================================================================================
++# tests/test_thermal.py  -  hot board -> fewer frames (BETAFLIGHT CHANGE, compute/thermal.py)
++# RUN:  python -m tests.test_thermal   (< 1 s)
++# =====================================================================================
++import os
++import tempfile
++
++import config
++from compute.thermal import Thermal
++
++d = tempfile.mkdtemp()
++path = os.path.join(d, "temp")
++now = [0.0]
++th = Thermal(path, clock=lambda: now[0])
++print("Test 1: no temperature file (laptop) -> full rate")
++assert Thermal(os.path.join(d, "missing")).frame_every() == 1
++for milli, every, orb in ((62000, 1, True), (config.THERMAL_SLOW_C * 1000 + 500, 2, True),
++                          (config.THERMAL_HOT_C * 1000 + 500, 3, False), (70000, 1, True)):
++    with open(path, "w") as f:
++        f.write(f"{milli}\n")
++    now[0] += 1.1
++    got = th.frame_every()
++    print(f"  {milli / 1000:5.1f} C -> every {got} frame(s), ORB {'on' if th.allow_orb() else 'off'}")
++    assert got == every and th.allow_orb() == orb
++with open(path, "w") as f:
++    f.write("99000\n")
++now[0] += 0.3                                             # read at most once a second
++assert th.frame_every() == 1
++print("\nALL THERMAL TESTS PASSED")
+diff --git a/vision/frozen.py b/vision/frozen.py
+new file mode 100644
+index 0000000..608f133
+--- /dev/null
++++ b/vision/frozen.py
+@@ -0,0 +1,60 @@
++# =====================================================================================
++# vision/frozen.py  -  ignore what moves WITH the camera (bench)          BETAFLIGHT CHANGE
++# -------------------------------------------------------------------------------------
++# IN PLAIN WORDS
++#   On the bench the judge carries the aircraft about 1 m above the floor. The 114 degree
++#   lens then also sees the judge's shoes, legs, hands and shadow, and the drone's own
++#   legs. All of those move together WITH the camera, so in the picture they stand still,
++#   while the real floor slides past. If the floor has little texture, those "still" spots
++#   can outvote it and the tracker reports "we did not move" (measured on 21 Nov: legs,
++#   a table and bags in view cut the agreeing points to 38% and picked the wrong motion).
++#   Rule: while the accelerometer says "we are being carried", the floor MUST slide in the
++#   picture. A tracked spot that stays put for FROZEN_WINDOW_S is attached to us: it is
++#   dropped for as long as this home picture is used. Standing still: nothing is dropped.
++#   Only used while disarmed (bench); in flight there is nothing attached in view.
++#
++# HOW IT WORKS (technical)
++#   Per home-picture point: its pixel position in the current frame (tracker.last_cur) over
++#   the last FROZEN_WINDOW_S. moving = BetaflightLink.moving() (raw accelerometer RMS change
++#   and gyro rate). If moving and a point's position stayed within FROZEN_STILL_PX ->
++#   attached for good. The tracker skips attached points before RANSAC (tracker.exclude).
++#   A new home picture (re-home, origin return) starts a fresh list.
++#   Prototype simulation: low-texture floor (30 floor points vs 60 on shoes/legs): B1
++#   passed 0% without, 100% with (60/60 attached points found, ~1 of 30 floor points lost).
++#   Cost: a few numpy operations on ~300 points per frame.
++#   Proof: tests/test_frozen.py (through the real tracker).
++# =====================================================================================
++import numpy as np
++
++import config
++
++
++class FrozenFilter:
++    def __init__(self):
++        self.ref = None
++        self.attached = None
++        self.hist = []                        # (t, points N x 2, valid N)
++
++    def for_tracker(self, tracker):
++        """Start a fresh list if the tracker's home picture changed. Returns the 'attached' array."""
++        if self.ref is not tracker.ref_pts:
++            self.ref = tracker.ref_pts
++            n = 0 if tracker.ref_pts is None else len(tracker.ref_pts)
++            self.attached = np.zeros(n, bool)
++            self.hist = []
++        return self.attached
++
++    def update(self, t, cur, valid, moving):
++        """cur: N x 2 pixel positions of the home points in this frame; valid: N bools (tracked OK)."""
++        if cur is None or self.attached is None or len(cur) != len(self.attached):
++            return self.attached
++        self.hist.append((t, np.asarray(cur, float).copy(), np.asarray(valid, bool).copy()))
++        while self.hist and t - self.hist[0][0] > config.FROZEN_WINDOW_S:
++            self.hist.pop(0)
++        if not moving or len(self.hist) < 4 or t - self.hist[0][0] < 0.8 * config.FROZEN_WINDOW_S:
++            return self.attached
++        P = np.stack([h[1] for h in self.hist])
++        V = np.all(np.stack([h[2] for h in self.hist]), axis=0)
++        span = np.hypot(*(P.max(axis=0) - P.min(axis=0)).T)
++        self.attached |= V & (span < config.FROZEN_STILL_PX)
++        return self.attached
+diff --git a/vision/rehome.py b/vision/rehome.py
+index 39131f5..ce989b2 100644
+--- a/vision/rehome.py
++++ b/vision/rehome.py
+@@ -53,12 +53,14 @@ class Rehome:
+         self.scale_min = config.REHOME_SCALE_MIN if scale_min is None else scale_min
+         self.scale_max = config.REHOME_SCALE_MAX if scale_max is None else scale_max
+         self.shift_frac = config.REHOME_SHIFT_FRAC
++        self.peak = 0                     # BETAFLIGHT CHANGE: most agreeing points seen since this reference
+         self.reset()
+ 
+     def reset(self):
+         """Call when a brand-new HOME is saved."""
+         self.offset_n = self.offset_e = 0.0
+         self.count = 0
++        self.peak = 0
+ 
+     def total(self, north, east):
+         """Position vs the ORIGINAL home."""
+@@ -67,11 +69,19 @@ class Rehome:
+     def to_origin(self):
+         """The reference is the ORIGINAL home picture again (the count of switches is kept)."""
+         self.offset_n = self.offset_e = 0.0
++        self.peak = 0
+ 
+-    def due(self, status, res, size=None):
+-        """size = picture (width, height) in pixels (None = only the scale trigger, as before)."""
++    def due(self, status, res, size=None, inlier_drop=False):
++        """size = picture (width, height) in pixels (None = only the scale trigger, as before).
++        inlier_drop (BETAFLIGHT CHANGE, bench / not holding): also when the agreeing points fell below
++        REHOME_INLIER_FRAC of the most seen on this reference (the floor is sliding out of view, or under the
++        holder's legs). Never during an engaged hold: each switch freezes in a little error."""
+         if status != "OK" or not res.ok:
+             return False
++        self.peak = max(self.peak, res.n_inliers)
++        frac = getattr(config, "REHOME_INLIER_FRAC", 0)
++        if inlier_drop and frac and self.peak >= 40 and res.n_inliers < frac * self.peak:
++            return True
+         if not self.scale_min <= res.scale <= self.scale_max:
+             return True
+         if not size or not self.shift_frac:
+@@ -86,6 +96,7 @@ class Rehome:
+             tracker.__dict__.update(saved)                # not enough texture: keep the old one
+             return False
+         self.offset_n, self.offset_e = north_total, east_total
++        self.peak = 0
+         health.prev_shift, health.prev_shift_t = (0.0, 0.0), t_capture
+         self.count += 1
+         return True
+diff --git a/vision/tracker.py b/vision/tracker.py
+index eeb6b5e..2312a3d 100644
+--- a/vision/tracker.py
++++ b/vision/tracker.py
+@@ -158,6 +158,24 @@ def to_north_east(shift_px, height_m, focal_px, yaw_rad):
+     return north, east
+ 
+ 
++def _per_cell_detect():
++    """BETAFLIGHT CHANGE: config.CORNERS_PER_CELL (read at call time so --set and tests can switch it)."""
++    try:
++        import config
++        return bool(getattr(config, "CORNERS_PER_CELL", False))
++    except ImportError:
++        return False
++
++
++def _is_still(M, centre, px=1.5):
++    """BETAFLIGHT CHANGE: does this home->now motion say 'nothing moved' (centre within px, no turn, no zoom)?"""
++    cx, cy = centre
++    dx = M[0, 0] * cx + M[0, 1] * cy + M[0, 2] - cx
++    dy = M[1, 0] * cx + M[1, 1] * cy + M[1, 2] - cy
++    return (math.hypot(dx, dy) < px and abs(math.atan2(M[1, 0], M[0, 0])) < math.radians(0.5)
++            and abs(math.hypot(M[0, 0], M[1, 0]) - 1.0) < 0.01)
++
++
+ class GroundTracker:
+     def __init__(self, K=None, dist=None, point_filter=None):
+         self.K = K
+@@ -171,6 +189,12 @@ class GroundTracker:
+         self.ref_und = None      # same corners with lens distortion removed
+         self.M_last = np.eye(2, 3, dtype=np.float64)  # last good home->now transform
+         self.centre = None       # (cx, cy) optical centre in pixels
++        # BETAFLIGHT CHANGE (vision/frozen.py): home points to leave out (attached to us: shoes, legs, own legs),
++        # and where every home point was found in the last frame. None = off = exactly the old behaviour.
++        self.exclude = None
++        self.last_cur = self.last_valid = None
++        self.reject_static = False   # BETAFLIGHT CHANGE: True while the IMU says "we are being carried" (bench):
++                                     # a "nothing moved" answer is then checked against the second-best motion
+ 
+     # ---------- Step 1: Harris corners, spread across the whole image ----------
+     def _detect_harris(self, gray):
+@@ -182,11 +206,42 @@ class GroundTracker:
+             if static is not None:
+                 mask = cv2.bitwise_and(mask, static)
+ 
++        per_cell = max(1, MAX_CORNERS // (GRID[0] * GRID[1]))
+         # Ask for LOTS of Harris corners (strongest first)...
+         corners = cv2.goodFeaturesToTrack(
+             gray, maxCorners=MAX_CORNERS * 4, qualityLevel=HARRIS_QUALITY,
+             minDistance=MIN_DISTANCE, mask=mask, blockSize=BLOCK_SIZE,
+             useHarrisDetector=True, k=HARRIS_K)
++        if _per_cell_detect():
++            # BETAFLIGHT CHANGE: top up STARVED cells. The search above takes the strongest corners of the whole
++            # picture first, so one strongly textured area (the holder's trousers, shoes, a bag) can take them all
++            # and leave a plain floor with none (tests/test_frozen.py: 144 of 144 on the legs). A cell that got
++            # fewer than a third of its share is searched again on its OWN strength scale. Cells that were fine are
++            # untouched (searching every cell that way added weak, noisy corners: climb test drift 15 -> 31 cm).
++            have = {}
++            for c in (corners if corners is not None else []):
++                x, y = c.ravel()
++                cell = (int(x * GRID[0] / w), int(y * GRID[1] / h))
++                have[cell] = have.get(cell, 0) + 1
++            extra, pad = [], BLOCK_SIZE
++            for gy in range(GRID[1]):
++                for gx in range(GRID[0]):
++                    if have.get((gx, gy), 0) >= max(1, per_cell // 3):
++                        continue
++                    x0, x1 = gx * w // GRID[0], (gx + 1) * w // GRID[0]
++                    y0, y1 = gy * h // GRID[1], (gy + 1) * h // GRID[1]
++                    X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad)
++                    sub = np.zeros((Y1 - Y0, X1 - X0), np.uint8)
++                    sub[y0 - Y0:y1 - Y0, x0 - X0:x1 - X0] = mask[y0:y1, x0:x1]
++                    if not sub.any():
++                        continue
++                    c = cv2.goodFeaturesToTrack(
++                        np.ascontiguousarray(gray[Y0:Y1, X0:X1]), maxCorners=per_cell * 2, qualityLevel=HARRIS_QUALITY,
++                        minDistance=MIN_DISTANCE, mask=sub, blockSize=BLOCK_SIZE, useHarrisDetector=True, k=HARRIS_K)
++                    if c is not None:
++                        extra.append(c + np.float32([X0, Y0]))
++            if extra:
++                corners = np.concatenate(([corners] if corners is not None else []) + extra)
+         if corners is None:
+             return np.empty((0, 1, 2), np.float32)
+         if self.point_filter is not None:                  # drop corners on glare
+@@ -195,7 +250,6 @@ class GroundTracker:
+                 return np.empty((0, 1, 2), np.float32)
+ 
+         # ...then keep only the best few in each grid cell, so they cover the image.
+-        per_cell = max(1, MAX_CORNERS // (GRID[0] * GRID[1]))
+         cell_count = {}
+         kept = []
+         for c in corners:                         # already sorted strongest -> weakest
+@@ -228,6 +282,7 @@ class GroundTracker:
+         self.ref_pts = self._detect_harris(gray)
+         self.ref_und = self._undistort(self.ref_pts)
+         self.M_last = np.eye(2, 3, dtype=np.float64)  # at home, nothing has moved
++        self.exclude = self.last_cur = self.last_valid = None   # BETAFLIGHT CHANGE: new home, new list
+         return len(self.ref_pts)
+ 
+     def relock(self, M):
+@@ -266,6 +321,9 @@ class GroundTracker:
+ 
+         lk_ok = (st1.ravel() == 1) & (st2.ravel() == 1) & inside
+         good = lk_ok & (fb_err < FB_MAX_ERROR_PX)          # Step 4: forward-backward check
++        self.last_cur, self.last_valid = cur, good.copy()  # BETAFLIGHT CHANGE: for vision/frozen.py
++        if self.exclude is not None and len(self.exclude) == len(good):
++            good &= ~self.exclude                          # BETAFLIGHT CHANGE: attached to us -> not the floor
+         res.n_tracked = int(lk_ok.sum())
+         res.n_fb_ok = int(good.sum())
+         if res.n_fb_ok < MIN_POINTS:
+@@ -283,6 +341,21 @@ class GroundTracker:
+             res.reason = "RANSAC found no consistent motion"
+             return res
+         inl = inl.ravel().astype(bool)
++        # BETAFLIGHT CHANGE (bench, vision/frozen.py): we are being carried but the best motion is "nothing moved"
++        # -> those agreeing points are attached to us (holder's shoes, legs, own legs). If the REST of the points
++        # agree on a real motion, that is the floor: use it. Never while not carried (reject_static False).
++        if self.reject_static and _is_still(M, self.centre) and (~inl).sum() >= MIN_POINTS:
++            rest = np.flatnonzero(~inl)
++            M2, inl2 = cv2.estimateAffinePartial2D(
++                src[rest], dst[rest], method=cv2.RANSAC, ransacReprojThreshold=RANSAC_THRESH_PX,
++                maxIters=2000, confidence=0.99, refineIters=10)
++            if M2 is not None and not _is_still(M2, self.centre):
++                inl2 = inl2.ravel().astype(bool)
++                if inl2.sum() >= max(MIN_INLIERS_TO_UPDATE, 0.3 * len(rest)):
++                    M, inl = M2, np.zeros_like(inl)
++                    inl[rest[inl2]] = True
++                    res.reason = "attached points ignored"
++                    res.n_fb_ok = len(rest)        # the attached ones were never floor candidates (health's ratio)
+         res.n_inliers = int(inl.sum())
+         res.inlier_pts = dst[inl]
+ 
+@@ -298,7 +371,9 @@ class GroundTracker:
+         res.ok = True
+ 
+         # Use this as the prediction for the next frame, if we really trust it
+-        if res.n_inliers >= MIN_INLIERS_TO_UPDATE and res.n_inliers >= 0.5 * res.n_fb_ok:
++        # (BETAFLIGHT CHANGE: while carried, "nothing moved" is never kept as the prediction: it is the holder's legs)
++        if (res.n_inliers >= MIN_INLIERS_TO_UPDATE and res.n_inliers >= 0.5 * res.n_fb_ok
++                and not (self.reject_static and _is_still(M, self.centre))):
+             self.M_last = M
+         return res
+ 
+diff --git a/vision_hold.py b/vision_hold.py
+index 3a24fd2..985bfd7 100644
+--- a/vision_hold.py
++++ b/vision_hold.py
+@@ -77,6 +77,9 @@ from vision.rolling_shutter import RollingShutterTracker, attitude_near
+ from vision.timing import load_timing
+ from safety import trial_mode                                    # NEW (Ayush A1): GPS can't take over
+ from safety.side_monitors import SideMonitors                    # NEW (Ayush A4/A5): watch-only advisors
++from compute.thermal import Thermal                              # BETAFLIGHT CHANGE: less work when the board is hot
++from fusion.scale import ScaleEstimator, fuse                    # BETAFLIGHT CHANGE: bench height from motion
++from vision.frozen import FrozenFilter                           # BETAFLIGHT CHANGE: ignore what moves with us
+ 
+ # ---------------- Settings ----------------
+ CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttymxc2" or "COM5"
+@@ -235,6 +238,18 @@ def main(argv=None):                                             # NEW: argv for
+     bench_height = args.fixed_height                         # STAGE 2 bench: height now, from the picture's scale
+     from link.apb_sensors import Gyro                        # STAGE 2 bench step 1: the APB's own IMU, read in
+     apb_gyro = Gyro()                                        # THIS process (None-safe off the board)
++    # BETAFLIGHT CHANGES (see docs/BETAFLIGHT_CHANGES.md):
++    #  - heading from the camera: Betaflight's own heading is GPS-corrected (course over ground) -> not used.
++    #    psi_v = heading of the drone in the frame of the home picture; ref_heading = heading of the current
++    #    reference picture in that frame (chained across re-homes like the north/east offsets).
++    vision_heading = betaflight and config.BF_HEADING_FROM_VISION
++    psi_v = ref_heading = 0.0
++    #  - the yaw cross-check needs a yaw that is not Betaflight's: the raw gyro, once its sign is checked
++    yaw_check = not (vision_heading and not config.BF_GYRO_YAW_SIGN)
++    frozen = FrozenFilter()                                  # - bench: drop points that move WITH the camera
++    thermal = Thermal()                                      # - hot board: process fewer frames
++    scale_est, vio_h, vio_sigma, vio_k = ScaleEstimator(), None, float("inf"), 1.0   # - bench height from motion
++    grab_i = 0
+ 
+     def act_on(actions):
+         """Do what handover.py asked. Returns True if it asked for a new HOME (REANCHOR)."""
+@@ -310,6 +325,9 @@ def main(argv=None):                                             # NEW: argv for
+                 time.sleep(0.05)
+                 continue
+             last_frame_ok = t_capture
++            grab_i += 1                                          # BETAFLIGHT CHANGE: hot board -> every 2nd/3rd frame
++            if is_camera and grab_i % thermal.frame_every():
++                continue
+             if config.CAMERA_UPSIDE_DOWN:                        # STAGE 2: camera mounted the other way round
+                 frame = cv2.rotate(frame, cv2.ROTATE_180)
+             small = downscale(to_gray(frame))                    # NEW: PROCESS_WIDTH (APB CPU). STAGE 2: grey directly
+@@ -353,6 +371,8 @@ def main(argv=None):                                             # NEW: argv for
+                     home_height = fixed_height or link.height(t_capture)   # Part D: scale reference for AutoReanchor
+                     bench_height = fixed_height
+                     origin, at_origin = dict(ref=dict(tracker.__dict__), att=home_att, height=home_height), True
++                    psi_v = ref_heading = 0.0                    # BETAFLIGHT CHANGE: home picture = heading 0
++                    scale_est, vio_h, vio_sigma, vio_k = ScaleEstimator(), None, float("inf"), 1.0
+                     reset_counter = (reset_counter + 1) % 256    # tells the EKF "position jumped to 0"
+                     prev_ne, vel_ned = None, np.zeros(3)
+                     print(f"HOME saved automatically ({n} corners, trigger '{args.trigger}')")
+@@ -374,7 +394,17 @@ def main(argv=None):                                             # NEW: argv for
+                 home_att = att_real                              # use the first attitude (approximation)
+                 if at_origin:
+                     origin["att"] = att_real
++            bench_frozen = betaflight and config.FROZEN_FILTER and not getattr(link, "armed", True)
++            carried = bench_frozen and link.moving(t_capture)    # BETAFLIGHT CHANGE: raw accelerometer says "moved"
++            tracker.exclude = frozen.for_tracker(tracker) if bench_frozen else None
++            tracker.reject_static = carried                      # "nothing moved" = the holder's legs, try the floor
+             res = tracker.track(gray, t_capture, attitude=att)
++            if bench_frozen:                                     # BETAFLIGHT CHANGE: spots that stay put while
++                frozen.update(t_capture, tracker.last_cur, tracker.last_valid, carried)   # we move: attached
++            if vision_heading:                                   # BETAFLIGHT CHANGE: heading from the camera
++                if res.ok:
++                    psi_v = ref_heading - math.radians(res.rotation_deg)
++                att = (att[0], att[1], psi_v)
+             prof.lap("track")                                    # NEW
+             rep = health.check(gray, res)
+             prof.lap("health")                                   # NEW
+@@ -394,7 +424,7 @@ def main(argv=None):                                             # NEW: argv for
+ 
+             # NEW: vision must agree with the IMU about how much we turned since home
+             imu_err, disagree = 0.0, False
+-            if config.USE_IMU_CHECK and res.ok and att_real:
++            if config.USE_IMU_CHECK and yaw_check and res.ok and att_real:   # BETAFLIGHT CHANGE: yaw_check
+                 agree, imu_err = imu_check.check(res.rotation_deg, att_real[2])
+                 if not agree:
+                     quality, disagree = -1, True
+@@ -407,7 +437,7 @@ def main(argv=None):                                             # NEW: argv for
+             # NEW: lost and failing (or locked onto something the IMU disagrees with) -> re-find home
+             failing = ((rep.status == "LOST" and health.bad_count > 0)
+                        or imu_bad_streak >= config.IMU_DISAGREE_RECOVER_FRAMES)
+-            if config.USE_RECOVERY and recovery.update(gray, failing):
++            if config.USE_RECOVERY and thermal.allow_orb() and recovery.update(gray, failing):   # BETAFLIGHT CHANGE
+                 print(f"Re-found HOME (re-lock #{recovery.relocks})")
+ 
+             # NEW: remove the fake shift caused by roll/pitch
+@@ -432,7 +462,8 @@ def main(argv=None):                                             # NEW: argv for
+ 
+             # NEW: climbed/descended ~15% -> new reference picture here, position stays continuous
+             # STAGE 2 bench: also when the picture slid sideways by REHOME_SHIFT_FRAC of its width (1.5 m carry at 1 m)
+-            if config.USE_REHOME and quality > 0 and att_real and rehome.due(rep.status, res, gray.shape[1::-1]):
++            if config.USE_REHOME and quality > 0 and att_real and rehome.due(rep.status, res, gray.shape[1::-1],
++                                                                          inlier_drop=not handover.engaged):
+                 if rehome.rehome(tracker, health, gray, t_capture, north, east, MIN_HOME_CORNERS):
+                     home_att = att_real
+                     if not (fixed_height and rehome.scale_min <= res.scale <= rehome.scale_max):
+@@ -441,6 +472,7 @@ def main(argv=None):                                             # NEW: argv for
+                     imu_check.set_home(att_real[2])              # rotation restarts at 0 here
+                     recovery.set_home(gray)
+                     at_origin = False
++                    ref_heading = psi_v                          # BETAFLIGHT CHANGE: heading chained like N/E
+                     print(f"Re-homed at {height:.1f} m (#{rehome.count}), offset N={north:+.2f} E={east:+.2f}")
+ 
+             # STAGE 2 bench (steps 2-3 + recovery bonus), two additions around the re-home above:
+@@ -456,11 +488,12 @@ def main(argv=None):                                             # NEW: argv for
+                     imu_check.set_home(att_real[2])
+                     recovery.set_home(gray)
+                     prev_ne, vel_ned = (prev_ne[0], prev_ne[1], t_capture), np.zeros(3)
++                    ref_heading = psi_v                          # BETAFLIGHT CHANGE: last known heading
+                     print(f"LOST for {config.LOST_KEYFRAME_AFTER_S:g} s with nothing known in view: new reference here, "
+                           f"position continues from N={prev_ne[0]:+.2f} E={prev_ne[1]:+.2f}")
+             # (b) The reference is a later picture and the FIRST home picture is in view again: measure against it
+             #     again. Whatever drift the chain of references collected on the way is gone.
+-            if (config.USE_ORIGIN_RETURN and origin and not at_origin and att_real
++            if (config.USE_ORIGIN_RETURN and origin and not at_origin and att_real and thermal.allow_orb()
+                     and frame_i % config.ORIGIN_CHECK_EVERY_N == 0):
+                 M = recovery.find_origin(gray)
+                 if M is not None:                                # where we are vs the first home, in pixels
+@@ -479,16 +512,27 @@ def main(argv=None):                                             # NEW: argv for
+                     imu_check.set_home(home_att[2] if home_att else None)
+                     health.prev_shift, health.prev_shift_t = back, t_capture   # health's jump check starts here
+                     prev_ne = None                               # the position may step: no fake velocity from it
++                    ref_heading = 0.0                            # BETAFLIGHT CHANGE: measured against home again
+                     print("First home picture is in view again: measuring against it (drift removed)")
+ 
++            # BETAFLIGHT CHANGE: bench height from motion (fusion/scale.py). Fed every frame, printed on the status
++            # line; it changes the numbers only with config.VIO_HEIGHT = True, disarmed, and a confident estimate.
++            if betaflight and quality > 0 and height:
++                scale_est.update(t_capture, link.integ.at(t_capture), (north / height, east / height, math.log(height)))
++                vio_h, vio_sigma = scale_est.estimate()
++                vio_k = 1.0
++                if (config.VIO_HEIGHT and not link.armed and vio_h is not None
++                        and config.VIO_HEIGHT_MIN_M <= vio_h <= config.VIO_HEIGHT_MAX_M):
++                    vio_k = fuse(height, 0.25 * height, vio_h, vio_sigma) / height
++
+             # ---------- 4. Send to the autopilot ----------
+             down = link.local_z[1] if link.local_z else 0.0      # ignored: height source is Baro
+-            send_n, send_e = (north, east) if quality > 0 else (0.0, 0.0)
++            send_n, send_e = (vio_k * north, vio_k * east) if quality > 0 else (0.0, 0.0)
+             # STAGE 2 (bench steps 6-7): not ready on ArduCopter = "receives no position" -> send nothing at all.
+             # Betaflight always gets the call: its link turns "not ready" into centred sticks.
+             if quality > 0 or betaflight or not config.ARDUPILOT_SILENT_WHEN_NOT_READY:
+                 link.send_odometry(t_capture, send_n, send_e, down, att,
+-                                   ned_to_body(vel_ned, *att), quality, reset_counter,
++                                   ned_to_body(vio_k * vel_ned, *att), quality, reset_counter,
+                                    metres_per_px=height / tracker.focal_px if quality > 0 else None)   # NEW
+             prof.lap("send")                                     # NEW
+             monitors.frame(t_capture, height, tracker.focal_px, quality, north, east,   # NEW (Ayush A4/A5):
+@@ -541,11 +585,16 @@ def main(argv=None):                                             # NEW: argv for
+                 g = apb_gyro.rates()
+                 imu = "" if g is None else f"   imu gyro {g[0]:+.2f} {g[1]:+.2f} {g[2]:+.2f} rad/s"
+                 if quality > 0:
+-                    yaw0 = origin["att"][2] if origin["att"] else att[2]
+-                    fwd, right = (north * math.cos(yaw0) + east * math.sin(yaw0),
+-                                  -north * math.sin(yaw0) + east * math.cos(yaw0))
+-                    print(f"READY      distance {math.hypot(north, east):5.2f} m   forward {fwd:+5.2f}   right {right:+5.2f}"
+-                          f"   height change {height - (origin['height'] or height):+5.2f} m   q={quality}{imu}", flush=True)
++                    yaw0 = 0.0 if vision_heading else (origin["att"][2] if origin["att"] else att[2])   # BETAFLIGHT CHANGE
++                    n_out, e_out = vio_k * north, vio_k * east
++                    fwd, right = (n_out * math.cos(yaw0) + e_out * math.sin(yaw0),
++                                  -n_out * math.sin(yaw0) + e_out * math.cos(yaw0))
++                    vio = "" if not betaflight else (f"   vio h={vio_h:.2f}+-{vio_sigma:.2f} m{' (used)' if vio_k != 1.0 else ''}"
++                                                     if vio_h else "   vio h=?")
++                    hot = f"   {thermal.temp_c:.0f}C" if thermal.temp_c else ""
++                    print(f"READY      distance {math.hypot(n_out, e_out):5.2f} m   forward {fwd:+5.2f}   right {right:+5.2f}"
++                          f"   height change {vio_k * (height - (origin['height'] or height)):+5.2f} m   q={quality}{imu}{vio}{hot}",
++                          flush=True)
+                 else:
+                     print(f"NOT READY  {rep.status}: {'; '.join(rep.reasons) or 'no height'}{imu}", flush=True)
+             if is_camera and not isinstance(cap, LatestFrame):   # (the grab thread already drops them)                                        # NEW: fell behind -> drop stale frames

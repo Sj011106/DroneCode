@@ -84,18 +84,37 @@ def camera_fps(cap, default=None):
 
 class LatestFrame:
     """STAGE 2: a camera whose read() never waits for the driver. A side thread grabs all the time; read()
-    hands over the newest frame not yet seen (waiting only if there is none yet) and `t` is the moment that
-    frame arrived. Everything else (get, set, release...) goes to the real camera."""
+    hands over the newest frame not yet seen (waiting only if there is none yet) and `t` is that frame's time.
+    `t`: with config.CAMERA_DRIVER_TIMESTAMP the camera driver's own time for the picture (V4L2 buffer time =
+    end of the picture, Stage 2 section 02) moved back by READOUT_S / 2 to its middle row, put on our clock;
+    otherwise (or if the driver's time is not on time.monotonic) the moment the thread received it.
+    `age` = how old the newest picture was when the thread received it (the camera latency; None = unknown).
+    Everything else (get, set, release...) goes to the real camera."""
 
     def __init__(self, cap, clock=time.time):
-        self.cap, self.clock, self.t = cap, clock, 0.0
+        self.cap, self.clock, self.t, self.age = cap, clock, 0.0, None
         self._new, self._item, self._alive = threading.Event(), (False, None, 0.0), True
         threading.Thread(target=self._loop, daemon=True).start()
+
+    def _driver_age(self):
+        """Seconds between the driver's picture time and now, or None if not usable."""
+        if not getattr(config, "CAMERA_DRIVER_TIMESTAMP", False):
+            return None
+        try:
+            t_drv = float(self.cap.get(cv2.CAP_PROP_POS_MSEC)) / 1000.0
+        except Exception:                            # a pretend camera (tests) or a backend without it
+            return None
+        age = time.monotonic() - t_drv
+        return age if 0.0 <= age < 0.5 else None     # 0 on the first frame / another clock -> not usable
 
     def _loop(self):
         while self._alive:
             ok, frame = self.cap.read()
-            self._item = (ok, frame, self.clock())
+            now, age = self.clock(), (self._driver_age() if ok else None)
+            if age is not None:
+                self.age = age
+                now -= age + config.READOUT_S / 2    # end of the picture -> its middle row
+            self._item = (ok, frame, now)
             self._new.set()
             if not ok:
                 time.sleep(0.02)
@@ -117,9 +136,10 @@ class LatestFrame:
         return getattr(self.cap, name)
 
 
-def make_low_latency(cap):
-    """Ask the driver for a 1-frame queue. Returns True if the backend accepted it."""
-    return bool(cap.set(cv2.CAP_PROP_BUFFERSIZE, 1))
+def make_low_latency(cap, buffers=1):
+    """Ask the driver for a `buffers`-frame queue (1 = no stale frames when reading directly; with the
+    LatestFrame thread use config.CAMERA_BUFFERS_WITH_THREAD). Returns True if the backend accepted it."""
+    return bool(cap.set(cv2.CAP_PROP_BUFFERSIZE, buffers))
 
 
 class FrameBudget:

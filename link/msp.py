@@ -17,6 +17,9 @@
 #                          The FC uses the first four while the engage switch (CH10) is on.
 #     108 MSP_ATTITUDE     int16 roll (0.1 deg), int16 pitch (0.1 deg), int16 heading (deg)
 #     105 MSP_RC           uint16 per channel: what the receiver sees (CH10 = engage switch)
+#     102 MSP_RAW_IMU      BETAFLIGHT CHANGE: 9 x int16: accelerometer (raw units, ~2048 = 1 g), gyro (deg/s),
+#                          magnetometer (none fitted). Plain sensor readings: Betaflight never mixes GPS into
+#                          them (unlike its heading, which it corrects with GPS course over ground).
 #   GNSS RULE (Stage 2 section 04): MSP_RAW_GPS (106) and friends must never be requested.
 #   request() refuses any command that is not in ALLOWED, so no caller can do it by mistake.
 #   Proof: tests/test_betaflight.py.
@@ -30,8 +33,8 @@
 # =====================================================================================
 import struct
 
-MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC = 105, 108, 200
-ALLOWED = frozenset({MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC})     # anything else (GPS!) is refused
+MSP_STATUS, MSP_RAW_IMU, MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC = 101, 102, 105, 108, 200
+ALLOWED = frozenset({MSP_STATUS, MSP_RAW_IMU, MSP_RC, MSP_ATTITUDE, MSP_SET_RAW_RC})   # anything else (GPS!) is refused
 
 
 def frame(command, payload=b""):
@@ -50,10 +53,13 @@ def request(command):
     return frame(command)
 
 
-def set_raw_rc(roll, pitch, throttle, yaw):
-    """The stick message. Values in microseconds (1500 = stick centred). AUX1-4 are sent as 1500:
-    the flight controller ignores them (Stage 2 section 03)."""
-    return frame(MSP_SET_RAW_RC, struct.pack("<8H", int(roll), int(pitch), int(throttle), int(yaw), 1500, 1500, 1500, 1500))
+def set_raw_rc(roll, pitch, throttle, yaw, aux=None):
+    """The stick message. Values in microseconds (1500 = stick centred). AUX1-4: the flight controller ignores
+    them (Stage 2 section 03). BETAFLIGHT CHANGE: sent as config.BF_AUX_US (1000, "off"), not 1500, so a wrong
+    override mask could never arm the aircraft (see config.py)."""
+    import config
+    a = int(config.BF_AUX_US if aux is None else aux)
+    return frame(MSP_SET_RAW_RC, struct.pack("<8H", int(roll), int(pitch), int(throttle), int(yaw), a, a, a, a))
 
 
 class Parser:
@@ -88,6 +94,19 @@ def parse_attitude(payload):
     """-> (roll_deg, pitch_deg, heading_deg) exactly as Betaflight reports them."""
     roll, pitch, heading = struct.unpack("<3h", payload[:6])
     return roll / 10.0, pitch / 10.0, float(heading)
+
+
+def parse_status(payload):
+    """MSP_STATUS -> True if the flight controller says it is ARMED, None if the reply is too short.
+    Bytes 6..9 are the active flight-mode boxes; ARM is box 0. MEASURED 21 Nov 2026: disarmed reads 0
+    even with no radio (when the arm CHANNEL reads 1775). Armed = 1 is from the protocol file, not yet seen."""
+    return bool(struct.unpack_from("<I", payload, 6)[0] & 1) if len(payload) >= 10 else None
+
+
+def parse_raw_imu(payload):
+    """BETAFLIGHT CHANGE -> (acc_x, acc_y, acc_z) in Betaflight's raw units, (gyro_x, gyro_y, gyro_z) in deg/s."""
+    v = struct.unpack("<9h", payload[:18])
+    return v[0:3], v[3:6]
 
 
 def parse_rc(payload):
