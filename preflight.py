@@ -10,8 +10,11 @@
 #     storage         the SD card has room for the recording (evidence for the judges)
 #     calibration     calib.npz is the Justice D's, made at the camera's size (Saumya's check_calib)
 #     timing          timing.npz exists and its numbers are possible for a 60 fps camera
-#     camera          /dev/video2 opens at 1280x720 and really delivers ~60 fps
-#     autopilot link  link/check_link.py passes (ArduPilot >= 4.5, attitude rate, height, params)
+#     camera          /dev/video2 opens at 1920x1080 and really delivers ~60 fps
+#     flight controller  BETAFLIGHT (our route, STAGE 2): the always-on sender (link/msp_sender.py) is running
+#                     and the flight controller answers it (tilt and radio channels arriving).
+#                     ARDUCOPTER fallback (--fc ardupilot): link/check_link.py passes (ArduPilot >= 4.5,
+#                     attitude rate, height, params)
 #     autopilot safety  no switch can select the GPS source set, GPS velocity is not fused,
 #                     flight-mode channel is not the arm switch
 #   Any NO-GO = do not fly. WARN = fly only if you understand it (or use --strict).
@@ -256,6 +259,33 @@ def check_link(connect, runner=subprocess.run, timeout=60):
     return Check("autopilot link", NOGO, f"check_link: {why}")
 
 
+# ---------------- 8b. Betaflight link (STAGE 2) ----------------
+def check_betaflight(link=None, wait_s=3.0, sleep=time.sleep):
+    """Is link/msp_sender.py running, and does the flight controller answer it? Listens to the sender's
+    telemetry for wait_s seconds. Read-only: nothing is sent to the aircraft."""
+    if link is None:
+        from link.betaflight_link import BetaflightLink
+        link = BetaflightLink()
+        try:
+            link.start()
+        except OSError as e:
+            return Check("Betaflight link", NOGO, f"cannot listen for the sender ({e}): is vision_hold still running?")
+    sleep(wait_s)
+    link.running = False
+    if link.mode_time is None:
+        return Check("Betaflight link", NOGO, "nothing from link/msp_sender.py (systemctl start msp_sender)")
+    if not link.attitudes or not link.rc:
+        return Check("Betaflight link", NOGO, "the sender runs but the flight controller does not answer "
+                     "(battery in? /dev/ttymxc2 at 115200? ask the organisers, never gpioset)")
+    hz = len(link.attitudes) / wait_s if wait_s else 0.0
+    if wait_s and hz < 20:
+        return Check("Betaflight link", WARN, f"tilt arrives at only {hz:.0f} Hz (want about 50)")
+    if len(link.rc) < config.BF_ENGAGE_CHANNEL:
+        return Check("Betaflight link", NOGO, f"only {len(link.rc)} radio channels reported: no engage switch (CH{config.BF_ENGAGE_CHANNEL})")
+    return Check("Betaflight link", GO, f"sender running, tilt at {hz:.0f} Hz, {len(link.rc)} radio channels, "
+                 f"engage switch {'ON' if link.engaged else 'off'}; no GNSS is requested on this route")
+
+
 # ---------------- 9. autopilot safety parameters ----------------
 SAFETY_PARAMS = ["FLTMODE_CH", "EK3_SRC_OPTIONS"] + [f"RC{i}_OPTION" for i in range(5, 17)]
 
@@ -327,14 +357,19 @@ def report(checks, strict=False):
 def run_checks(args, runner=subprocess.run, reader=read_params):
     checks = [check_trial_mode()]
     dev_cam = f"/dev/video{args.camera}" if str(args.camera).isdigit() else args.camera
-    checks.append(check_busy([dev_cam, args.connect]))
+    betaflight = getattr(args, "fc", config.FC) == "betaflight"      # STAGE 2
+    # Betaflight: the serial port is held by the msp_sender service ON PURPOSE, so only the camera must be free
+    checks.append(check_busy([dev_cam] if betaflight else [dev_cam, args.connect]))
     checks.append(check_temperature())
     checks.append(check_storage())
     cam_check, cam_size = check_camera(args.camera)
     checks.append(check_calibration(camera_size=cam_size))
     checks.append(check_timing())
     checks.append(cam_check)
-    if not args.bench:
+    if betaflight:
+        if not args.bench:
+            checks.append(check_betaflight())
+    elif not args.bench:
         checks.append(check_link(args.connect, runner=runner))
         checks += check_autopilot_safety(reader(args.connect, SAFETY_PARAMS))
     return checks
@@ -344,7 +379,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Pre-flight GO / NO-GO")
     ap.add_argument("--connect", default="/dev/ttymxc2", help="autopilot link (APB manual p.14)")
     ap.add_argument("--camera", default="2", help="camera (2 = /dev/video2, APB manual p.12)")
-    ap.add_argument("--bench", action="store_true", help="no autopilot connected: skip the link checks")
+    ap.add_argument("--bench", action="store_true", help="no flight controller connected: skip the link checks")
+    ap.add_argument("--fc", default=config.FC, choices=["betaflight", "ardupilot"],   # STAGE 2
+                    help="flight controller route (default: config.FC)")
     ap.add_argument("--strict", action="store_true", default=config.PREFLIGHT_STRICT,
                     help="WARN counts as NO-GO (use for the scored trial)")
     args = ap.parse_args(argv)

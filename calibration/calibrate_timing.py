@@ -44,6 +44,7 @@ import time
 import cv2
 import numpy as np
 
+import config
 from fusion.tilt import nadir_offset_px
 from vision.rolling_shutter import attitude_at, correct_points
 from vision.timing import CameraTiming, save_timing
@@ -126,7 +127,9 @@ def main():
     from vision.tracker import load_calibration
 
     ap = argparse.ArgumentParser(description="Measure camera readout time and camera-IMU offset")
-    ap.add_argument("--connect", default="tcp:127.0.0.1:5762")
+    ap.add_argument("--connect", default="tcp:127.0.0.1:5762", help="ArduCopter route only")
+    ap.add_argument("--fc", default=config.FC, choices=["betaflight", "ardupilot"],   # STAGE 2
+                    help="betaflight: tilt comes from link/msp_sender.py, which must be running")
     ap.add_argument("--camera", default="0")
     ap.add_argument("--seconds", type=float, default=20.0)
     args = ap.parse_args()
@@ -135,7 +138,11 @@ def main():
     if K is None:
         print("Run calibration/auto_calibrate.py first (needs calib.npz).")
         return
-    link = DroneLink(args.connect)
+    if args.fc == "betaflight":                            # STAGE 2: same tilt source as in flight
+        from link.betaflight_link import BetaflightLink
+        link = BetaflightLink()
+    else:
+        link = DroneLink(args.connect)
     link.start()
     cap = cv2.VideoCapture(int(args.camera) if args.camera.isdigit() else args.camera)
     make_low_latency(cap)
@@ -168,7 +175,8 @@ def main():
             pairs.append((t0, pr[0], t1, pr[1]))
     print(f"Recorded {len(frames)} frames ({len(pairs)} usable pairs) and {len(history)} IMU samples.")
     if len(pairs) < 50 or len(history) < 50:
-        print("Not enough data - check the camera and the MAVLink connection, then retry.")
+        print("Not enough data - check the camera and the flight controller link "
+              "(Betaflight: is msp_sender running?), then retry.")
         return
 
     offset, err = estimate_offset(pairs, history, K)

@@ -25,7 +25,7 @@ from collections import deque
 from pymavlink import mavutil
 
 # ---------------- Settings ----------------
-BAUD = 921600                        # only used for serial connections
+BAUD = 230400                        # serial only. Stage 2: ArduCopter <-> APB is MAVLink 2 at 230400
 HEIGHT_TIMEOUT_S = 0.5   # height readings older than this are not trusted
 
 # EKF origin: ANY fixed place works, it just has to be set once without a GPS.

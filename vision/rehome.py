@@ -15,7 +15,11 @@
 #
 # HOW IT WORKS (technical)
 #   - Trigger: status OK, valid position, and res.scale outside [REHOME_SCALE_MIN,
-#     REHOME_SCALE_MAX] (default 0.85..1.18, well inside health.py's 0.75..1.33 gate).
+#     REHOME_SCALE_MAX] (default 0.85..1.18, well inside health.py's 0.75..1.33 gate),
+#     OR (Stage 2 bench) the picture has slid more than REHOME_SHIFT_FRAC of its width
+#     or height: low over the floor a 1.5 m carry takes the first picture out of view.
+#   - to_origin(): vision_hold found the FIRST home picture again and measures against it
+#     (config.USE_ORIGIN_RETURN): offsets go back to 0, the collected drift is gone.
 #   - Re-reference: tracker.set_reference(current frame); if too few corners, the old
 #     reference is restored (tracker state snapshot) and we try again next frame.
 #   - Continuity: offset_ne += position at the switch (already tilt-corrected, in metres,
@@ -30,7 +34,8 @@
 # WHERE IT PLUGS IN
 #   vision_hold.py after the position is computed; vision_hold also moves home_att
 #   (tilt), the IMU-check home yaw and the recovery fingerprints to the new reference.
-#   Switch: config.USE_REHOME. Proof: tests/test_rehome.py (climb 10 m -> 40 m).
+#   Switch: config.USE_REHOME. Proof: tests/test_rehome.py (climb 10 m -> 40 m) and
+#   tests/test_bench.py (1.5 m carry and 3 m loop at 1 m).
 #
 # REFERENCES
 #   - Klein & Murray, "Parallel Tracking and Mapping for Small AR Workspaces", ISMAR 2007
@@ -47,6 +52,7 @@ class Rehome:
     def __init__(self, scale_min=None, scale_max=None):
         self.scale_min = config.REHOME_SCALE_MIN if scale_min is None else scale_min
         self.scale_max = config.REHOME_SCALE_MAX if scale_max is None else scale_max
+        self.shift_frac = config.REHOME_SHIFT_FRAC
         self.reset()
 
     def reset(self):
@@ -58,8 +64,20 @@ class Rehome:
         """Position vs the ORIGINAL home."""
         return north + self.offset_n, east + self.offset_e
 
-    def due(self, status, res):
-        return status == "OK" and res.ok and not self.scale_min <= res.scale <= self.scale_max
+    def to_origin(self):
+        """The reference is the ORIGINAL home picture again (the count of switches is kept)."""
+        self.offset_n = self.offset_e = 0.0
+
+    def due(self, status, res, size=None):
+        """size = picture (width, height) in pixels (None = only the scale trigger, as before)."""
+        if status != "OK" or not res.ok:
+            return False
+        if not self.scale_min <= res.scale <= self.scale_max:
+            return True
+        if not size or not self.shift_frac:
+            return False
+        return (abs(res.shift_px[0]) > self.shift_frac * size[0]      # a quarter of the picture gone on
+                or abs(res.shift_px[1]) > self.shift_frac * size[1])  # either axis (it is wider than tall)
 
     def rehome(self, tracker, health, gray, t_capture, north_total, east_total, min_corners):
         """Make the current frame the new reference. Returns True if it worked."""

@@ -90,12 +90,15 @@ LOIT_ACC_MAX,250         # LOITER max acceleration 2.5 m/s^2 (default 5): smalle
 FS_EKF_ACTION,1          # EKF position estimate bad -> LAND (backup to recovery/failsafe.py)
 FS_EKF_THRESH,0.8        # how bad before acting (default; lower = earlier, more false alarms)
 RC7_OPTION,0             # RC7 is not used by vision_hold.py any more (HOME_TRIGGER "start"); ArduPilot must not use it either
+RC10_OPTION,56           # STAGE 2 engage switch: CH10 (TL2) high = LOITER, low = back to the pilot's mode at once.
+#                          56 = "Loiter" auxiliary function. VERIFY IN THE SIMULATOR before any aircraft;
+#                          load_params SKIPS it if the channel already has a function (ask the crew first).
                          # ArduPilot must not use it for anything else
 
 # ---------------- 7. Hardware-specific: fill in from the technical spec ----------------
 # Companion computer (APB) link. WRONG PORT CAN DISABLE THE RC RECEIVER OR ESC TELEMETRY.
 #SERIAL2_PROTOCOL,2      # MAVLink 2 (ODOMETRY's quality field needs MAVLink 2)
-#SERIAL2_BAUD,921        # 921600 baud = link/drone_link.py BAUD
+#SERIAL2_BAUD,230        # 230400 baud = link/drone_link.py BAUD (Stage 2)
 #
 # GNSS: if the receiver is fitted but jammed/spoofed for the trial, disable it.
 #GPS_TYPE,0              # firmware 4.5 and older

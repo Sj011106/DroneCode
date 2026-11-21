@@ -82,10 +82,10 @@ expect(pf.check_storage(sd, mounts, lambda p: Usage(0, 0, 30e9)), pf.WARN, "FAT3
 expect(pf.check_storage(sd, mounts_ex, lambda p: Usage(0, 0, 30e9)), pf.GO, "exfat")
 
 print("5. calibration (Saumya's check_calib + size == camera)")
-expect(pf.check_calibration("calib.npz"), pf.NOGO, "no image size")          # the repo's webcam file
+expect(pf.check_calibration("calib.npz"), pf.GO, "1920x1080")                # the repo file: datasheet values
 spec = os.path.join(tmp, "calib_spec.npz")
 write_spec(spec, force=True)
-expect(pf.check_calibration(spec, camera_size=(1280, 720)), pf.GO, "1280x720")
+expect(pf.check_calibration(spec, camera_size=(1920, 1080)), pf.GO, "1920x1080")
 expect(pf.check_calibration(spec, camera_size=(640, 480)), pf.NOGO, "recalibrate")
 expect(pf.check_calibration(os.path.join(tmp, "none.npz")), pf.NOGO, "no ")
 
@@ -102,7 +102,7 @@ expect(pf.check_timing(os.path.join(tmp, "late.npz")), pf.WARN, "offset")
 class FakeCam:
     """A camera with its own clock: each read() advances it by 1/fps (no real sleeping, so a busy
     computer can't change the measured frame rate)."""
-    def __init__(self, opened=True, size=(1280, 720), fps=60.0, picture=True):
+    def __init__(self, opened=True, size=(1920, 1080), fps=60.0, picture=True):
         self.opened, self.size, self.dt, self.picture = opened, size, 1.0 / fps, picture
         self.t = 0.0
 
@@ -127,7 +127,7 @@ def cam_check(**kw):
     return pf.check_camera("2", lambda s: cam, clock=lambda: cam.t)
 
 
-expect(cam_check(), pf.GO, "1280x720 at 60 fps")
+expect(cam_check(), pf.GO, "1920x1080 at 60 fps")
 expect(cam_check(size=(640, 480)), pf.NOGO, "640x480")
 expect(cam_check(fps=30), pf.WARN, "30 fps")
 expect(cam_check(opened=False), pf.NOGO, "can't open")

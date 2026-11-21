@@ -1,0 +1,35 @@
+# =====================================================================================
+# deploy/msp_sender.service  -  start the always-on Betaflight sender at boot (STAGE 2)
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS
+#   Betaflight keeps flying our last stick message for ever and reads "throttle cut, full
+#   tilt" before our first one (Stage 2 section 03). So link/msp_sender.py must run from
+#   the moment the board boots and come back at once if it ever stops. It starts BEFORE
+#   the vision program and does not depend on it: until vision is ready it sends centred
+#   sticks. Only for the Betaflight route; on ArduCopter do not enable it (two programs on
+#   one serial cable corrupt each other).
+#   install.sh fills in @USER@ and @DIR@. Enable for the event:
+#       systemctl enable --now msp_sender vision_hold
+#   Watch it:   journalctl -u msp_sender -f
+#   Bench check of tilt signs and channels (stop the service first):
+#       systemctl stop msp_sender ; venv/bin/python -m link.msp_sender --monitor
+#
+# REFERENCE: Stage 2 package Rev 2.0 section 03 (safety rule), section 05 step 8 (restart by itself).
+# =====================================================================================
+
+[Unit]
+Description=Betaflight MSP sender (always-on safe stick output)
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@DIR@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@DIR@/venv/bin/python -m link.msp_sender
+Restart=always
+RestartSec=0.2
+Nice=-15
+
+[Install]
+WantedBy=multi-user.target
