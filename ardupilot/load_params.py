@@ -23,8 +23,8 @@
 #
 # HOW TO RUN (from the repo root, drone DISARMED)
 #   python -m ardupilot.load_params --dry-run                     # just show what's in the file
-#   python -m ardupilot.load_params --connect /dev/ttyAMA0        # write + verify
-#   python -m ardupilot.load_params --connect /dev/ttyAMA0 --verify
+#   python -m ardupilot.load_params --connect /dev/ttymxc2        # write + verify
+#   python -m ardupilot.load_params --connect /dev/ttymxc2 --verify
 #   Then reboot the flight controller if it says so.
 #
 # REFERENCES

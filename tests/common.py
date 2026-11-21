@@ -29,4 +29,5 @@ def use_test_camera():
     np.savez(path, K=K, dist=np.zeros((1, 5)))
     config.CALIB_FILE = path
     config.TIMING_FILE = os.path.join(folder, "no_timing.npz")   # missing -> config defaults
+    config.USE_FEATURE_FILTER = False      # never the real drone's mask.png in simulated tests
     return path

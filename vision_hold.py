@@ -3,6 +3,8 @@
 #   'r' (save home)     -> saved by itself when the HOME TRIGGER fires (see HOME_TRIGGER)
 #   'v' (use vision)    -> switches by itself once health.py says tracking is trusted (OK)
 #   'g' (back to GPS)   -> switches back by itself if tracking is LOST (if a GPS is fitted)
+#                          NEW (Ayush A1): only with --practice. TRIAL MODE (the default) makes this
+#                          impossible: GNSS must not aid the scored hold (safety/trial_mode.py).
 #   'q' (quit)          -> Ctrl+C, the camera dying, or MAX_SECONDS: shuts down SAFELY
 #
 # Every frame:  camera -> tracker.py -> health.py -> ODOMETRY message -> autopilot
@@ -66,9 +68,11 @@ from vision.enhance import downscale, enhance, scale_camera_matrix
 from vision.rehome import Rehome
 from vision.rolling_shutter import RollingShutterTracker, attitude_near
 from vision.timing import load_timing
+from safety import trial_mode                                    # NEW (Ayush A1): GPS can't take over
+from safety.side_monitors import SideMonitors                    # NEW (Ayush A4/A5): watch-only advisors
 
 # ---------------- Settings ----------------
-CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttyAMA0" or "COM5"
+CONNECTION = "tcp:127.0.0.1:5762"   # simulator. Real drone e.g. "/dev/ttymxc2" or "COM5"
 
 HOME_TRIGGER = "start"  # when to save HOME (replaces the 'r' key):
                         #  "mode"  = when the pilot switches into a mode in HOLD_MODES
@@ -129,6 +133,8 @@ def main(argv=None):                                             # NEW: argv for
     ap.add_argument("--fixed-height", type=float, default=None,
                     help="bench test only: pretend the camera is this many metres up")
     ap.add_argument("--no-gps-fallback", action="store_true")
+    ap.add_argument("--practice", action="store_true",           # NEW (Ayush A1)
+                    help="practice only: allow the GPS fallback (NEVER for the scored trial)")
     ap.add_argument("--show", action="store_true", help="show a preview window")
     ap.add_argument("--max-seconds", type=float, default=MAX_SECONDS)
     # NEW: record a flight, replay it through this same code, toggle settings for replays
@@ -145,11 +151,13 @@ def main(argv=None):                                             # NEW: argv for
             raise SystemExit(f"--set: config.py has no setting {name}")
         setattr(config, name, ast.literal_eval(value))
         print(f"config.{name} = {getattr(config, name)!r}")
+    trial = trial_mode.from_args(args)                           # NEW (Ayush A1): sets --no-gps-fallback
     signal.signal(signal.SIGTERM, _stop_on_sigterm)              # NEW: 'systemctl stop' -> safe shutdown
     replay = Replay(args.replay) if args.replay else None        # NEW
     clock = replay.clock if replay else time.time                # NEW: recorded time during replay
 
     link = replay.link if replay else DroneLink(args.connect)    # NEW: replay link
+    trial.guard(link)                                            # NEW (Ayush A1): drops any "use GPS" command
     link.start()
     link.check_params()
 
@@ -175,6 +183,9 @@ def main(argv=None):                                             # NEW: argv for
     tracker = RollingShutterTracker(K, dist, attitude_history=link.attitudes, timing=timing,
                                     enabled=config.USE_ROLLING_SHUTTER)   # NEW: explicit, so --set works
     health = HealthChecker()
+    if getattr(config, "USE_FEATURE_FILTER", False):             # Saumya: ignore props/OSD (mask.png)
+        from vision.feature_filter import attach
+        attach(tracker, health)
     imu_check, height_filter = ImuCheck(), HeightFilter()        # NEW
     recovery = Recovery(tracker)                                 # NEW
     rehome = Rehome()                                            # NEW: new reference while climbing
@@ -213,6 +224,7 @@ def main(argv=None):                                             # NEW: argv for
     started, next_frame = time.time(), time.time()
     k_scaled, imu_bad_streak = False, 0                          # NEW
     print(f"Running. Home trigger = '{args.trigger}'. Logging to {log_path}. Ctrl+C to stop.")
+    monitors = SideMonitors(link, log_path)                      # NEW (Ayush A4/A5): never steers
 
     try:
         while args.max_seconds is None or time.time() - started < args.max_seconds:
@@ -263,6 +275,9 @@ def main(argv=None):                                             # NEW: argv for
             gray = enhance(small)                                # NEW: enhance() = contrast boost
             if not k_scaled:                                     # NEW: lens K for the processed size
                 orig_w = (replay.orig_width if replay else None) or frame.shape[1]
+                orig_h = round(frame.shape[0] * orig_w / frame.shape[1])
+                K, dist = load_calibration(config.CALIB_FILE, image_size=(orig_w, orig_h))   # size check
+                tracker.dist = dist
                 tracker.K = scale_camera_matrix(K, small.shape[1] / orig_w)
                 k_scaled = True
             t_frame = timing.mid_time(t_capture)                 # NEW: real capture time (= t_capture until calibrated)
@@ -364,6 +379,9 @@ def main(argv=None):                                             # NEW: argv for
                                ned_to_body(vel_ned, *att), quality, reset_counter,
                                metres_per_px=height / tracker.focal_px if quality > 0 else None)   # NEW
             prof.lap("send")                                     # NEW
+            monitors.frame(t_capture, height, tracker.focal_px, quality, north, east,   # NEW (Ayush A4/A5):
+                           rep.status, reset_counter)            # after the send; can't change it
+            prof.lap("safety")                                   # NEW (Ayush): its cost per frame
 
             # ---------- 5. Source switching (replaces 'v' and 'g') ----------
             if rep.status == "OK" and quality > 0:
@@ -429,12 +447,15 @@ def main(argv=None):                                             # NEW: argv for
             link.set_source(SRC_GPS)
             time.sleep(0.5)
         link.running = False
+        monitors.close()                                         # NEW (Ayush A4/A5): before anything that
+        print(trial.summary())                                   # NEW (Ayush A1)     can raise (see below)
         cap.release()
         log_file.close()
         if recorder:                                             # NEW
             recorder.close()
             print(f"Recording saved in {rec_dir} ({recorder.n} frames)")
-        cv2.destroyAllWindows()
+        if args.show:                                            # PROPOSED (C6): no window was opened
+            cv2.destroyAllWindows()                              # without --show; headless OpenCV raises here
         if prof.frames:                                          # NEW: compute summary for the slide
             print(f"\n{prof.table()}\nRe-locks: {recovery.relocks}, stale frames dropped: {budget.dropped}")
         print(f"Done. Log saved to {log_path}")

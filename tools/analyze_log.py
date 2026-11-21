@@ -135,6 +135,8 @@ def main():
     if "ms_total" in cols:
         tot = np.array([num(x) for x in cols["ms_total"]])
         print(f"Per frame: mean {np.nanmean(tot):.1f} ms, 95% {np.nanpercentile(tot, 95):.1f} ms")
+    from tools.hold_score import print_vision_verdict            # NEW (Ayush A3): PASS/FAIL, labelled
+    print_vision_verdict(t, north, east, ok, np.array([num(x) for x in cols.get("height_m", [])]))
     print(f"Plots saved in {args.out}/")
 
 

@@ -18,6 +18,7 @@ USE_TILT = True              # fusion/tilt.py: remove fake motion caused by roll
 USE_IMU_CHECK = True         # fusion/imu_check.py: reject frames where vision and IMU disagree
 USE_HEIGHT_FILTER = True     # fusion/height.py: smooth height, ignore spikes
 USE_RECOVERY = True          # recovery/recovery.py: re-find home after LOST
+USE_FEATURE_FILTER = True    # vision/feature_filter.py: ignore props/OSD text (needs mask.png)
 USE_REHOME = True            # vision/rehome.py: new reference picture while climbing/descending
 USE_CLAHE = True             # vision/enhance.py: local contrast boost (high / hazy / flat light)
 
@@ -90,3 +91,60 @@ ODOM_PX_NOISE_WORST = 3.0    # quality 1
 # ---------------- Compute budget ----------------
 TARGET_FPS = 30              # processing rate we aim for; budget per frame = 1 / TARGET_FPS.
                              # (The camera runs at 60 fps; stale frames are dropped by frame age.)
+
+# ---------------- Trial safety lock (Ayush, task A1: safety/trial_mode.py) ----------------
+TRIAL_MODE = True            # True = GPS can NEVER take over: vision_hold sets --no-gps-fallback by itself
+                             # and a guard on the link drops every "use GPS" command. Only
+                             # `vision_hold.py --practice` turns it off (loud banner). The rules: GNSS must
+                             # not aid the scored hold (Grand Final package Stage 1 Rev 1.3, p.2, p.7 Q14).
+                             # preflight.py says NO-GO if this is False. Keep it True.
+
+# ---------------- Pre-flight GO / NO-GO (Ayush, task A2: preflight.py) ----------------
+PREFLIGHT_STRICT = False     # True = every WARN counts as NO-GO (set True, or pass --strict, for the trial)
+PREFLIGHT_CAMERA_SIZE = (1280, 720)   # Justice D datasheet; APB manual p.12: fixed 1280x720 @ 60 fps
+PREFLIGHT_MIN_FPS = 50       # 60 fps nominal: below 50 measured -> WARN
+PREFLIGHT_TEMP_WARN_C = 75   # the fan holds ~62 C, the board shuts itself down at 95 C (APB manual p.11)
+PREFLIGHT_TEMP_NOGO_C = 85   # our choice: 10 C of margin below the 95 C shutdown
+PREFLIGHT_SD_PATH = "/sdcard"   # APB manual p.11
+PREFLIGHT_SD_WARN_MB = 2000  # ~8 min of lossless recording (RECORD_CODEC above: ~250 MB/min worst case)
+
+# ---------------- Hold limits -> PASS / FAIL (Ayush, task A3: tools/hold_score.py) ----------------
+# NOT IN THE PDFs YET. The Grand Final package (Stage 1 Rev 1.3) says Stage 2 will define "the approved
+# altitude levels, qualifying hold and measurement rules" (p.2; also p.3 and p.8). Every number below
+# is a PLACEHOLDER and is printed as such until HOLD_LIMITS_OFFICIAL = True. When Stage 2 arrives:
+# copy each number, write the page into HOLD_LIMITS_SOURCE, set a limit to None if it is not judged.
+USE_HOLD_SCORE = True        # print PASS/FAIL at the end of tools/analyze_log.py and tools/truth_drift.py
+HOLD_LIMITS_OFFICIAL = False # True ONLY when the numbers below are copied from the Stage 2 package
+HOLD_LIMITS_SOURCE = "Stage 2 package not published yet"
+HOLD_MIN_SECONDS = 30.0      # PLACEHOLDER: shortest hold that counts (seconds)
+HOLD_MAX_DRIFT_M = 1.0       # PLACEHOLDER: largest horizontal distance from the engage point (m)
+HOLD_RMS_DRIFT_M = 0.5       # PLACEHOLDER: RMS distance from the engage point (m)
+HOLD_RADIUS_M = 1.0          # PLACEHOLDER: radius for the "time inside" rule (m)
+HOLD_MIN_INSIDE_PCT = 95.0   # PLACEHOLDER: % of the hold inside HOLD_RADIUS_M
+HOLD_MAX_SPREAD_M = None     # "stability" as wobble around the average position (m); None = not judged
+
+# ---------------- Altitude Ceiling Advisor (Ayush, task A4: safety/ceiling.py) ----------------
+# Watches only: predicts our position error from height, focal length and quality, and warns
+# before a climb step that would fail the HOLD_* limits above. Never changes what is sent.
+CEILING_ADVISOR = True       # on/off (log: logs/flight_<time>_safety.csv)
+CEILING_TILT_SIGMA_DEG = 0.5 # leftover roll/pitch error after tilt cancel, per axis. SIMULATED: ArduCopter
+                             # SITL EKF attitude vs truth (roll 0.62-0.69, pitch 0.25 deg). Measure in flight!
+CEILING_MARGIN = 1.5         # vision may use only 1/1.5 of each limit (the rest: wind, controller)
+CEILING_CLIMB_STEPS_M = (10, 20, 40, 60, 80, 100)   # climb ladder, docs/WORKLIST.md task 3.8
+CEILING_WINDOW = 30          # median over this many trusted frames (1 s at 30 fps)
+
+# ---------------- GNSS integrity monitor (Ayush, task A5: safety/gnss_monitor.py) ----------------
+# WATCH ONLY: flags JAMMED / SPOOF SUSPECTED from MAVLink GPS_RAW_INT. Never used to navigate.
+# The thresholds are our choices (not in the PDFs); tune them from practice-flight logs.
+GNSS_MONITOR = True          # on/off (log: logs/flight_<time>_safety.csv)
+GNSS_REQUEST_HZ = 5          # ask the autopilot to stream GPS_RAW_INT this often (0 = don't ask)
+GNSS_MIN_SATS = 6            # fewer satellites -> JAMMED (degraded)
+GNSS_MAX_HDOP = 2.5          # worse horizontal dilution of precision -> JAMMED (degraded)
+GNSS_TIMEOUT_S = 2.0         # no new GPS report for this long (after we had some) -> JAMMED
+GNSS_JUMP_MIN_M = 20.0       # a GPS jump bigger than this ...
+GNSS_JUMP_SPEED_MPS = 25.0   # ... and faster than this (90 km/h; no hovering drone does it) -> SPOOF SUSPECTED
+GNSS_DISAGREE_M = 10.0       # GPS vs vision displacement differ by more than max(this, 4 x GPS accuracy) ...
+GNSS_DISAGREE_S = 3.0        # ... for this long while vision is trusted -> SPOOF SUSPECTED
+                             # (5 m / 2 s gave 3 false alarms in 10 min of honest, wandering GPS: measured)
+GNSS_ANCHOR_S = 5.0          # GPS reference point = median of the first 5 s of fixes after home is saved
+GNSS_ALARM_HOLD_S = 10.0     # keep showing SPOOF SUSPECTED this long after the last evidence

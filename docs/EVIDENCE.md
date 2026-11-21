@@ -36,6 +36,9 @@ Legend: ✅ have it (simulated or real, as stated) · 🟡 tool ready, real data
 | Processing performance | `compute/benchmark.py` table (ms per stage, FPS, CPU, memory); every flight log has ms per stage (`tools/analyze_log.py` compute plot). Laptop: ~7 ms/frame | 🟡 run on the APB |
 | Limited resources / competing services | Process at 640×360 (`config.PROCESS_WIDTH`, same metres: `tests/test_process_scale.py`); stale-frame dropping by age (`tests/test_budget.py`: 20 ms/frame on a 1-frame queue → **20 → 50 fps** vs the old rule) | ✅ sim / 🟡 APB |
 | Repeatable execution | Record once, replay identically (`test_replay`: **90/90** positions identical) | ✅ |
+| Ready-to-fly check on the APB itself | `preflight.py` (Ayush, A2): one GO / NO-GO list with a reason per line: trial mode, busy camera / serial port, CPU temperature (WARN 75 °C, NO-GO 85 °C; shutdown 95 °C, APB p.11), SD space + FAT32, calibration size, timing, camera 1280×720 @ ~60 fps, `check_link`, GPS-switch parameters. `tests/test_preflight.py`: 39 checks | ✅ fakes / 🟡 run on the APB |
+| Cost of the extra watchers | Profiler stage "safety" (ceiling advisor + GNSS monitor): **0.1 ms/frame** (laptop, `tests/test_ceiling.py`) | ✅ laptop / 🟡 APB |
+| Every test, every push | `.github/workflows/tests.yml` + `python -m tests.run_all` (Ayush, A6): **21/21** test files on clean Python 3.10 and 3.12 | ✅ rehearsed / 🟡 first push |
 
 ## D. Flight controller integration and pilot handover
 
@@ -44,6 +47,7 @@ Legend: ✅ have it (simulated or real, as stated) · 🟡 tool ready, real data
 | Integration with the event FC | ArduPilot ≥ 4.5 (`check_link` enforces), `ardupilot/vision_hold.param` + `load_params.py` (verify / write / renamed params) | 🟡 needs the event build. **Open risk:** the event firmware may not be ArduPilot (Stage 2) |
 | Engage / disengage without disruption | Vision runs from takeoff, EKF switched to vision **before** the pilot engages; the engage switch only changes the flight mode (LOITER holds where engaged). Re-homing keeps the position continuous while climbing | 🟡 SITL decision logic 6/6 (`tools/sitl_handover_check.py`, `docs/sitl_handover_check.log`; vehicle disarmed, GPS on). Armed, GNSS-denied engage/disengage with the real FC still to show; procedure to confirm with Stage 2 |
 | Evidence | Flight video + `analyze_log` health timeline + ArduPilot .bin log around the switch | ⬜ |
+| GNSS cannot aid the scored hold (package p.2, p.7 Q14) | **Trial mode** (Ayush, A1, `safety/trial_mode.py`): default; sets `--no-gps-fallback` itself and drops every "use GPS" command on the link (source set ≠ 2, EK3_SRC*/RCx_OPTION writes, RC override). `tests/test_trial_mode.py`: bytes on the radio decoded back to MAVLink: **0** GPS requests in trial mode (**8** blocked), **8** in practice; real `vision_hold.py` through a 1.5 s blackout + shutdown: GPS requested **0** times (practice: **2**). `preflight.py` NO-GO if any RC channel can select the EKF source set | ✅ sim |
 
 ## E. Reliability and reproducibility
 
@@ -53,6 +57,8 @@ Legend: ✅ have it (simulated or real, as stated) · 🟡 tool ready, real data
 | Behaves safely | Failsafe on **no valid position for 3 s while on vision** (`recovery/failsafe.py`, mode change resent until confirmed; `test_failsafe`, `test_replay` Test 4); ArduPilot EKF failsafe as backup | ✅ sim |
 | Handles interruptions | `tests/test_recovery.py`: 2 s and 10 s blackouts with 1–2 m drift, trusted again **0.2 s** after the picture returns (never without recovery) | ✅ sim / 🟡 real |
 | Reproduces results across runs | Replay toolchain + the same tests rerun on every change; climb ladder table in `docs/WORKLIST.md` 3.8 (several flights per altitude) | 🟡 |
+| Knows its own limit before reaching it | **Altitude Ceiling Advisor** (Ayush, A4, `safety/ceiling.py`): predicted error = height × √((pixel noise ÷ focal)² + 2·tan²(leftover tilt)), "predicted max safe height here", warning before a climb step. `tests/test_ceiling.py`: prediction vs measured error on `test_altitude`'s scenes **−12% to −20%** at 5–80 m (stated tolerance ±25%); tilt term vs `fusion/tilt.py`: **49.4 vs 49.5 cm** at 40 m; sent messages identical with it on/off | ✅ sim / 🟡 tilt error to measure in flight |
+| Detects jammed / spoofed GNSS (watch only) | **GNSS integrity monitor** (Ayush, A5, `safety/gnss_monitor.py`): JAMMED (no 3D fix, < 6 sats, HDOP > 2.5, no reports) and SPOOF SUSPECTED (jump > 20 m at > 25 m/s, or GPS vs vision disagree > 10 m for 3 s). `tests/test_gnss_monitor.py`: **0** false alarms in 10 min of honest wandering GPS, teleport caught **at once**, 0.5 m/s drag caught in **23 s**, sent messages identical with it on/off | ✅ sim / 🟡 needs GPS_RAW_INT at the event |
 
 ## F. Engineering contribution and explanation
 
@@ -67,7 +73,7 @@ Legend: ✅ have it (simulated or real, as stated) · 🟡 tool ready, real data
 | **matplotlib** | plots | the analysis tools (`analyze_log`, `truth_drift`) |
 
 Team code: everything in `vision/`, `fusion/`, `health/`, `recovery/`, `compute/`, `link/`, `ardupilot/`,
-`calibration/`, `tools/`, `tests/`, `vision_hold.py`. The tracker, health checker, MAVLink link and lens
+`calibration/`, `tools/`, `tests/`, `safety/`, `vision_hold.py`, `preflight.py`. The tracker, health checker, MAVLink link and lens
 calibration are Saumya's; the rest builds around them.
 
 ### Experiments, decisions, limitations
@@ -75,7 +81,10 @@ calibration are Saumya's; the rest builds around them.
 - Decisions: ArduPilot only; don't write our own flight controller; absolute reference to home + re-homing;
   first-order tilt fix (residual ~2 px at 5°, documented upgrade path); process at 640×360.
 - Test status: `python -m tests.test_replay` passes on the Part D branch (20 Nov, Python 3.14, OpenCV 5.1.0).
-- Limitations to state honestly: simulated numbers until real flights; tilt fix second-order residual; re-homing
+- Safety and evidence layer (Ayush): trial mode, pre-flight GO / NO-GO, PASS/FAIL scoring, ceiling advisor, GNSS
+  monitor, CI. Each has a config switch, a test and a measured number; the watchers can't change what is sent.
+- Limitations to state honestly: simulated numbers until real flights; hold limits are placeholders until Stage 2;
+  the ceiling advisor's leftover tilt error (0.5°) is from the simulator; tilt fix second-order residual; re-homing
   error grows per switch; 50 Hz attitude can't correct vibration above ~25 Hz; webcam calib until recalibrated.
 
 ## G. Live position hold
@@ -83,6 +92,7 @@ calibration are Saumya's; the rest builds around them.
 | What judges want | Our evidence | Status |
 |---|---|---|
 | Controlled holds at increasing altitudes | Climb ladder (`docs/WORKLIST.md` 3.8): per height % time OK, real drift from `truth_drift` | ⬜ |
+| Instant PASS/FAIL after each hold | `tools/hold_score.py` (Ayush, A3): GPS-referee verdict per altitude band in `truth_drift`, labelled vision-estimate verdict in `analyze_log`, the 3.8 table row ready to paste. **Limits are PLACEHOLDERS** until Stage 2 (package p.2) | ✅ tool / 🟡 official numbers |
 | Under vibration, wind, changing light | `test_altitude` (flat light 40–80 m: contrast boost **0% → 91%** trusted, the maximum possible after the 5-frame trust delay), real flights | ✅ sim / ⬜ real |
 
 ## Bonus routes (Stage 1 outline; points set in Stage 2)

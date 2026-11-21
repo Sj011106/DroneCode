@@ -1,0 +1,55 @@
+# =====================================================================================
+# .github/workflows/tests.yml  -  run every test on every push and pull request
+#                                                                     (OWNER: Ayush, task A6)
+# -------------------------------------------------------------------------------------
+# IN PLAIN WORDS
+#   With four people pushing, something will break. GitHub runs all our tests on its own
+#   computers after every push and shows a green tick or a red cross next to the commit
+#   and on the pull request (docs/WORKLIST.md task 1.9). Team rule: merge only on green.
+#
+# HOW IT WORKS
+#   - Two Python versions (3.10 and 3.12): the APB's Yocto image version is not confirmed,
+#     so we check both ends of the likely range.
+#   - opencv-python, exactly as in requirements.txt (+ the libGL system library it needs).
+#     NOT the "headless" build: with it, vision_hold.py's shutdown line
+#     cv2.destroyAllWindows() raises an error (found by rehearsing this job; reported to
+#     Saumya, whose line it is). If the APB's OpenCV has no window support, the same
+#     error happens there: see docs/WORKLIST.md.
+#   - The same command the team runs by hand: python -m tests.run_all
+#   - No hardware, no network to a drone: every test uses simulated cameras and links.
+#
+# REFERENCES
+#   - GitHub Actions for Python: https://docs.github.com/en/actions/use-cases-and-examples/building-and-testing/building-and-testing-python
+# =====================================================================================
+
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: System library OpenCV needs (usually already there)
+        run: sudo apt-get install -y --no-install-recommends libgl1
+      - name: Install dependencies (requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run every test
+        env:
+          MPLBACKEND: Agg
+        run: python -m tests.run_all
