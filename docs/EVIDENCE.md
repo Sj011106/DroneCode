@@ -41,8 +41,8 @@ Legend: ✅ have it (simulated or real, as stated) · 🟡 tool ready, real data
 
 | What judges want | Our evidence | Status |
 |---|---|---|
-| Integration with the event FC | ArduPilot ≥ 4.5 (`check_link` enforces), `ardupilot/vision_hold.param` + `load_params.py` (verify / write / renamed params) | 🟡 needs the event build |
-| Engage / disengage without disruption | Vision runs from takeoff, EKF switched to vision **before** the pilot engages; the engage switch only changes the flight mode (LOITER holds where engaged). Re-homing keeps the position continuous while climbing | 🟡 procedure to confirm with Stage 2 |
+| Integration with the event FC | ArduPilot ≥ 4.5 (`check_link` enforces), `ardupilot/vision_hold.param` + `load_params.py` (verify / write / renamed params) | 🟡 needs the event build. **Open risk:** the event firmware may not be ArduPilot (Stage 2) |
+| Engage / disengage without disruption | Vision runs from takeoff, EKF switched to vision **before** the pilot engages; the engage switch only changes the flight mode (LOITER holds where engaged). Re-homing keeps the position continuous while climbing | 🟡 SITL decision logic 6/6 (`tools/sitl_handover_check.py`, `docs/sitl_handover_check.log`; vehicle disarmed, GPS on). Armed, GNSS-denied engage/disengage with the real FC still to show; procedure to confirm with Stage 2 |
 | Evidence | Flight video + `analyze_log` health timeline + ArduPilot .bin log around the switch | ⬜ |
 
 ## E. Reliability and reproducibility
@@ -74,6 +74,7 @@ calibration are Saumya's; the rest builds around them.
 - Experiments: every `tests/test_*.py` prints a number for a slide; real flights add `analyze_log` / `truth_drift` plots.
 - Decisions: ArduPilot only; don't write our own flight controller; absolute reference to home + re-homing;
   first-order tilt fix (residual ~2 px at 5°, documented upgrade path); process at 640×360.
+- Test status: `python -m tests.test_replay` passes on the Part D branch (20 Nov, Python 3.14, OpenCV 5.1.0).
 - Limitations to state honestly: simulated numbers until real flights; tilt fix second-order residual; re-homing
   error grows per switch; 50 Hz attitude can't correct vibration above ~25 Hz; webcam calib until recalibrated.
 
