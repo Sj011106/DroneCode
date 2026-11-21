@@ -131,7 +131,12 @@ def main():
     parser.add_argument("--no-window", action="store_true", help="don't open a preview window")
     parser.add_argument("--square", type=float, default=SQUARE_M,
                         help="measured size of one square in metres (default %(default)s)")
+    parser.add_argument("--board", default=None, metavar="COLSxROWS",
+                        help="INNER corners of your board, e.g. 7x7 for a chess board (default 8x5)")
     args = parser.parse_args()
+    if args.board:                                   # STAGE 2: a real board is rarely 9x6 squares
+        global BOARD
+        BOARD = tuple(int(v) for v in args.board.lower().split("x"))
 
     is_camera = args.source.isdigit() or args.source.startswith("/dev/video")
     cap = open_camera(args.source, raw=args.no_window)   # STAGE 2: same format request as vision_hold.py
@@ -151,23 +156,29 @@ def main():
           f"Stops after {TARGET_VIEWS} snapshots.")
 
     while len(all_image_points) < TARGET_VIEWS and time.time() - start < MAX_SECONDS:
-        ok, frame = cap.read()
+        try:                                         # STAGE 2: Ctrl+C = finish with the snapshots taken so far
+            ok, frame = cap.read()
+            gray = to_gray(frame) if ok else None
+            k = 2 if ok and gray.shape[1] > 1280 else 1      # half-size search: 4x faster on the APB;
+            found_now = cv2.findChessboardCornersSB(gray[::k, ::k], BOARD) if ok else None   # refined below
+        except KeyboardInterrupt:
+            print("Stopped by Ctrl+C: calculating from what was captured.")
+            break
         if not ok:
             break                                    # video ended / camera unplugged
-        gray = to_gray(frame)
         h, w = gray.shape
         image_size = (w, h)
 
-        # STAGE 2: search a half-size copy (4x faster on the APB); cornerSubPix below refines at full size
-        k = 2 if w > 1280 else 1
-        found, corners = cv2.findChessboardCornersSB(gray[::k, ::k] if k > 1 else gray, BOARD)
+        found, corners = found_now
         if found and k > 1:
             corners = corners * k
         status = "looking for the board..."
         if found:
             # 1. Held still? (compare with where the corners were in the last frame)
             still = (prev_corners is not None and
-                     np.abs(corners - prev_corners).reshape(-1, 2).mean() < STILL_PX)
+                     np.abs(corners - prev_corners).reshape(-1, 2).mean() < STILL_PX * max(1.0, w / 640))
+            # STAGE 2 (measured): 1.5 px at 1920 wide was never met by a hand-held drone; the limit now grows
+            # with the picture (4.5 px at 1920). The sharpness check below still rejects motion blur
             # 2. Sharp enough? 3. New place or angle? 4. Not too soon after the last one?
             sharp = board_sharpness(gray, corners) > MIN_BOARD_SHARPNESS
             view = describe_view(corners, w, h)
